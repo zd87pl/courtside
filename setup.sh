@@ -115,14 +115,14 @@ if [ ! -d .venv ]; then "$PYTHON" -m venv .venv; ok "created .venv"; else ok ".v
 source .venv/bin/activate
 python -m pip install --quiet --upgrade pip
 
-EXTRAS="dev,server"
-if [ "$APPLE_SILICON" = 1 ]; then EXTRAS="local,dev,server"; fi
+EXTRAS="dev,server,youtube"
+if [ "$APPLE_SILICON" = 1 ]; then EXTRAS="local,dev,server,youtube"; fi
 step "Installing courtside  ${DIM}(extras: ${EXTRAS})${RST}"
 if pip install --quiet -e ".[${EXTRAS}]"; then
   ok "installed"
 else
   warn "install with extras failed (mlx-vlm may be unavailable here); installing core only."
-  pip install --quiet -e ".[dev,server]"
+  pip install --quiet -e ".[dev,server,youtube]"
 fi
 
 # quick smoke test of the model-free core
@@ -169,13 +169,22 @@ open_report() { # open_report <path>
 }
 
 step "Launch a demo"
-say "  1) Instant sample demo    ${DIM}- open the bundled report, no model, always works${RST}"
-say "  2) Analyze my own video   ${DIM}- run the full pipeline now${RST}"
-say "  3) Finish                 ${DIM}- just print the commands${RST}"
-demo="$(ask_value "Pick 1-3" "1")"
+say "  1) Web app (recommended)  ${DIM}- courtside-ui: dashboard, analyze from the browser${RST}"
+say "  2) Instant sample demo    ${DIM}- open the bundled report, no model, always works${RST}"
+say "  3) Analyze my own video   ${DIM}- run the full pipeline in the terminal${RST}"
+say "  4) Finish                 ${DIM}- just print the commands${RST}"
+demo="$(ask_value "Pick 1-4" "1")"
 
 case "$demo" in
   1)
+    step "Starting the web app  ${DIM}(Ctrl+C to stop; restart later with: courtside-ui)${RST}"
+    if [ "$ASSUME_YES" = "1" ]; then
+      say "  (assume-yes mode: not starting the blocking server; run 'courtside-ui' yourself)"
+    else
+      courtside-ui || warn "web app exited with an error"
+    fi
+    ;;
+  2)
     SAMPLE="examples/demo_session/report.html"
     if [ -f "$SAMPLE" ]; then
       # rebuild from cached data so it reflects the installed code, then open it
@@ -186,7 +195,7 @@ case "$demo" in
       warn "sample not found at $SAMPLE"
     fi
     ;;
-  2)
+  3)
     vid="$(ask_value "Path to a tennis video (mp4/mov)" "")"
     [ -n "$vid" ] || { warn "no path given - skipping"; vid=""; }
     if [ -n "$vid" ] && [ -f "$vid" ]; then
@@ -214,6 +223,8 @@ esac
 step "Done"
 say "Activate the environment in new shells with:  ${BOLD}source .venv/bin/activate${RST}"
 say "Common commands:"
+say "  ${DIM}# web app (dashboard + analyze from the browser)${RST}"
+say "  courtside-ui"
 say "  ${DIM}# instant demo, no model${RST}"
 say "  courtside --from-dir examples/demo_session"
 say "  ${DIM}# analyze footage${RST}"

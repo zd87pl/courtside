@@ -1,9 +1,9 @@
 {
-  "start_s": 24.0,
-  "end_s": 29.5,
+  "start_s": 870.0,
+  "end_s": 875.5,
   "strokes": [
     {
-      "t_s": 24.7,
+      "t_s": 870.7,
       "player": "near",
       "stroke": "serve",
       "technique_flags": [],
@@ -16,7 +16,7 @@
       ]
     },
     {
-      "t_s": 26.1,
+      "t_s": 872.1,
       "player": "far",
       "stroke": "return",
       "technique_flags": [
@@ -29,7 +29,7 @@
       "tactical_flags": []
     },
     {
-      "t_s": 27.8,
+      "t_s": 873.8,
       "player": "near",
       "stroke": "forehand",
       "technique_flags": [],

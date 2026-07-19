@@ -8,16 +8,16 @@ other recurring issue.
 
 ## Technique Themes
 - **late_preparation** (high) - the unit turn starts after the ball crosses the service line,
-  so contact drifts behind the front hip (t=14.6s, t=26.1s). Costs pace and margin.
-- **low_ball_toss** (medium) - serve toss peaks barely above the racquet, cramping extension (t=13.1s).
-- **no_split_step** (low) - missing split before the first move, though partly occluded (t=31.7s).
+  so contact drifts behind the front hip (t=126.6s, t=872.1s). Costs pace and margin.
+- **low_ball_toss** (medium) - serve toss peaks barely above the racquet, cramping extension (t=125.1s).
+- **no_split_step** (low) - missing split before the first move, though partly occluded (t=1786.7s).
 
 ## Tactical Patterns
 - **short_ball_no_approach** (high) - steps in on a short ball then recovers to the baseline
-  instead of finishing at the net (t=18.0s).
+  instead of finishing at the net (t=130.0s).
 - **no_depth_variation** (medium) - repeated backhands landing near the service line hand the
-  opponent short balls (t=16.2s).
-- **serve_placement_predictable** (medium) - back-to-back serves to the same body position (t=24.7s).
+  opponent short balls (t=128.2s).
+- **serve_placement_predictable** (medium) - back-to-back serves to the same body position (t=870.7s).
 
 ## Prioritized Drills
 1. **Short-ball approach ladder** - feed short balls; player must approach and close.
@@ -37,5 +37,5 @@ This report is derived from single-camera video. It can support observations abo
 timing, swing shape in the image plane, court positioning, and shot patterns. It cannot
 reliably measure absolute depth or distances, foot-contact timing, weight transfer, or
 forces - treat any such claims as out of scope. Stroke timestamps are approximate
-(frame-sampling resolution ~1.88s). Some strokes may be missed between sampled frames;
+(frame-sampling resolution ~1.80s). Some strokes may be missed between sampled frames;
 counts are lower bounds, not exact totals.

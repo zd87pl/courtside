@@ -49,36 +49,69 @@ def _frame_for_time(frames: list[Path], start_s: float, fps_used: float, t_s: fl
 
 
 def _md_to_html(md: str) -> str:
-    """Tiny Markdown subset -> HTML (headers, bold, hr, bullet lists, paragraphs)."""
-    lines = md.splitlines()
+    """Tiny Markdown subset -> HTML (headers, bold, hr, bullet lists, paragraphs).
+
+    Consecutive plain lines join into one paragraph, and a wrapped line inside a
+    list continues its <li> - source-wrapped prose must not fragment.
+    """
     out: list[str] = []
-    in_list = False
+    list_tag: str | None = None  # "ul" | "ol" | None
+    para: list[str] = []
+    _ordered = re.compile(r"^\d+\.\s+")
+
+    def close_para() -> None:
+        if para:
+            out.append(f"<p>{_inline(' '.join(para))}</p>")
+            para.clear()
 
     def close_list() -> None:
-        nonlocal in_list
-        if in_list:
-            out.append("</ul>")
-            in_list = False
+        nonlocal list_tag
+        if list_tag:
+            out.append(f"</{list_tag}>")
+            list_tag = None
 
-    for raw in lines:
+    def open_list(tag: str, start: int = 1) -> None:
+        nonlocal list_tag
+        if list_tag != tag:
+            close_list()
+            # honor the source numbering so "1./2./3." split by blank lines
+            # doesn't render as 1./1./1.
+            out.append(f'<ol start="{start}">' if tag == "ol" and start != 1 else f"<{tag}>")
+            list_tag = tag
+
+    for raw in md.splitlines():
         line = raw.rstrip()
-        if not line.strip():
+        stripped = line.strip()
+        if not stripped:
+            close_para()
             close_list()
             continue
-        if line.startswith("### "):
-            close_list(); out.append(f"<h3>{html.escape(line[4:])}</h3>")
-        elif line.startswith("## "):
-            close_list(); out.append(f"<h2>{html.escape(line[3:])}</h2>")
-        elif line.startswith("# "):
-            close_list(); out.append(f"<h1>{html.escape(line[2:])}</h1>")
-        elif line.strip() == "---":
-            close_list(); out.append("<hr>")
+        m_ord = _ordered.match(stripped)
+        if line.startswith(("# ", "## ", "### ")) or stripped == "---":
+            close_para()
+            close_list()
+            if line.startswith("### "):
+                out.append(f"<h3>{html.escape(line[4:])}</h3>")
+            elif line.startswith("## "):
+                out.append(f"<h2>{html.escape(line[3:])}</h2>")
+            elif line.startswith("# "):
+                out.append(f"<h1>{html.escape(line[2:])}</h1>")
+            else:
+                out.append("<hr>")
         elif line.lstrip().startswith(("- ", "* ")):
-            if not in_list:
-                out.append("<ul>"); in_list = True
+            close_para()
+            open_list("ul")
             out.append(f"<li>{_inline(line.lstrip()[2:])}</li>")
+        elif m_ord:
+            close_para()
+            open_list("ol", start=int(m_ord.group().rstrip(". ") or 1))
+            out.append(f"<li>{_inline(stripped[m_ord.end():])}</li>")
+        elif list_tag:
+            # continuation of a wrapped list item
+            out[-1] = out[-1][:-5] + " " + _inline(stripped) + "</li>"
         else:
-            close_list(); out.append(f"<p>{_inline(line)}</p>")
+            para.append(stripped)
+    close_para()
     close_list()
     return "\n".join(out)
 
@@ -117,8 +150,10 @@ def _timeline_svg(session: dict[str, Any], activity: dict[str, Any] | None) -> s
 
     # rally blocks
     for c in clips:
-        a = c.get("analysis") or {}
-        if not a:
+        if not isinstance(c, dict):
+            continue
+        a = c.get("analysis")
+        if not isinstance(a, dict):
             continue
         s0, s1 = a.get("start_s", 0.0), a.get("end_s", 0.0)
         parts.append(
@@ -136,13 +171,29 @@ def _timeline_svg(session: dict[str, Any], activity: dict[str, Any] | None) -> s
     return "".join(parts)
 
 
-def _collect_flag_moments(out_dir: Path, session: dict[str, Any], min_sev: str = "medium", cap: int = 12) -> list[dict[str, Any]]:
+def collect_flag_moments(
+    out_dir: Path,
+    session: dict[str, Any],
+    min_sev: str = "medium",
+    cap: int = 12,
+    img_fn=None,
+) -> list[dict[str, Any]]:
+    """Flagged strokes paired with their nearest keyframe.
+
+    ``img_fn(frame_path) -> str | None`` controls how the image is referenced;
+    the default embeds a base64 data URI (self-contained export). The web UI
+    passes a URL builder instead.
+    """
+    if img_fn is None:
+        img_fn = _img_data_uri
     order = {"low": 1, "medium": 2, "high": 3}
     threshold = order[min_sev]
     moments: list[dict[str, Any]] = []
     for c in session.get("clips", []):
-        a = c.get("analysis") or {}
-        if not a:
+        if not isinstance(c, dict):
+            continue
+        a = c.get("analysis")
+        if not isinstance(a, dict):
             continue
         frames = _clip_frames(out_dir, c)
         for st in a.get("strokes", []):
@@ -157,10 +208,14 @@ def _collect_flag_moments(out_dir: Path, session: dict[str, Any], min_sev: str =
                             "t_s": st.get("t_s", 0.0),
                             "stroke": st.get("stroke", "unknown"),
                             "player": st.get("player", "unknown"),
-                            "img": _img_data_uri(fp) if fp else None,
+                            "kind": "technique" if kind == "technique_flags" else "tactical",
+                            "img": img_fn(fp) if fp else None,
                         })
     moments.sort(key=lambda m: order.get(m["severity"], 1), reverse=True)
     return moments[:cap]
+
+
+_collect_flag_moments = collect_flag_moments  # back-compat alias
 
 
 _CSS = """

@@ -45,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
 
     require_tools()
 
+    args.video = args.video.resolve()  # leading-dash filenames vs ffmpeg/cv2
     segs = detect_segments(args.video) or fixed_windows(args.video, 15.0)
     if not segs:
         print("no segments found in video - is it readable?")

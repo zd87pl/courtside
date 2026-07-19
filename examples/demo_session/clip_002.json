@@ -1,16 +1,16 @@
 {
-  "start_s": 30.2,
-  "end_s": 32.6,
+  "start_s": 1785.2,
+  "end_s": 1787.6,
   "strokes": [
     {
-      "t_s": 30.9,
+      "t_s": 1785.9,
       "player": "near",
       "stroke": "forehand",
       "technique_flags": [],
       "tactical_flags": []
     },
     {
-      "t_s": 31.7,
+      "t_s": 1786.7,
       "player": "far",
       "stroke": "unknown",
       "technique_flags": [

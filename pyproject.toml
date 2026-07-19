@@ -17,11 +17,13 @@ dependencies = [
 # Pinned tightly because mlx-vlm's API churns across minor versions.
 local = ["mlx-vlm>=0.6.5,<0.7"]
 server = ["openai>=1.40"]
+youtube = ["yt-dlp>=2024.10.0"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
 courtside = "courtside.analyze:main"
 courtside-bench = "courtside.bench:main"
+courtside-ui = "courtside.webapp:main"
 
 [build-system]
 requires = ["hatchling"]

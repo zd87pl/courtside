@@ -38,6 +38,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from . import __version__, config, report
+from .fetch import fetch_video, is_url
 from .frames import ClipFrames, extract_clip_frames, probe_duration, require_tools
 from .prompts import SYSTEM, build_clip_prompt, build_report_prompt, limitations_footer
 from .report_html import write_html_report
@@ -201,7 +202,8 @@ def _replay(out_dir: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="courtside", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("video", type=Path, nargs="?")
+    p.add_argument("video", nargs="?",
+                   help="local video file, or a YouTube/any yt-dlp-supported URL")
     p.add_argument("--model", default=config.DEFAULT_MODEL_KEY,
                    help=f"registry key or HF repo/local path (default: {config.DEFAULT_MODEL_KEY}; "
                         f"keys: {', '.join(config.MODELS)})")
@@ -221,6 +223,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="re-render reports from a previous run dir (no model)")
     p.add_argument("--prefetch", metavar="MODEL", default=None,
                    help="download a model's weights to the HF cache and exit")
+    p.add_argument("--download-dir", type=Path, default=None,
+                   help="where URL inputs are downloaded (default: current directory)")
     p.add_argument("--offline", action="store_true",
                    help="forbid any network access (weights must be pre-cached)")
     p.add_argument("--stream", action="store_true", help="echo model tokens live during analysis")
@@ -240,9 +244,24 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.video is None:
         p.error("video is required (or use --from-dir DIR / --prefetch MODEL)")
-    video: Path = args.video
+
+    if is_url(args.video):
+        if args.offline:
+            p.error("--offline forbids downloading; pass a local file instead of a URL")
+        _log(f"fetching {args.video} ...")
+        try:
+            video = fetch_video(args.video, args.download_dir or Path.cwd(), on_line=_log)
+        except RuntimeError as e:
+            _log(f"error: {e}")
+            return 2
+        _log(f"downloaded: {video.name}")
+    else:
+        video = Path(args.video)
     if not video.exists():
         p.error(f"video not found: {video}")
+    # absolute path: ffmpeg/ffprobe/cv2 would parse a leading-dash filename as
+    # a flag (pathlib normalizes "./-x.mp4" to "-x.mp4", so "./" doesn't help)
+    video = video.resolve()
 
     try:
         require_tools()

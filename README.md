@@ -29,6 +29,27 @@ Prefer to see output before installing anything? Open
 [`examples/demo_session/report.html`](examples/demo_session/) — a complete run you can
 inspect without a Mac, a GPU, or a model download.
 
+## Web app
+
+```bash
+courtside-ui        # serves http://127.0.0.1:8799 (localhost only)
+```
+
+A SaaS-style dashboard over the same pipeline: sessions overview with aggregate stats,
+**analyze from the browser** (pick a workspace video, paste a path **or a YouTube URL**,
+choose a model, watch the log stream live), and a rich per-session view — rally/stroke
+timeline with hover details, flagged-moments keyframe gallery, per-rally cards, and the
+coaching report. Light and dark themes. One analysis runs at a time (one laptop, one
+model). URL downloads fetch over the network via yt-dlp; the analysis itself still runs
+entirely on-device (`--offline` refuses URLs for that reason).
+
+It is stdlib-only and binds to `127.0.0.1` — the "backend" is your laptop, nothing is
+uploaded anywhere. `Export report` produces the self-contained `report.html` for sharing.
+
+```bash
+courtside-ui --root ~/tennis-videos   # scan a different workspace (repeatable)
+```
+
 ## Setup (manual)
 
 ```bash
@@ -77,6 +98,9 @@ courtside match.mp4 --dry-run
 
 # full run with defaults
 courtside match.mp4
+
+# analyze straight from YouTube (needs the [youtube] extra; downloads, then runs locally)
+courtside "https://youtube.com/watch?v=..." --max-clips 3
 
 # quick pass: first 3 clips, small model, tokens streaming live
 courtside match.mp4 --model qwen3-vl-8b --max-clips 3 --stream

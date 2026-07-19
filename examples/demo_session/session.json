@@ -64,15 +64,15 @@
     {
       "index": 0,
       "frame_dir": "clip_000",
-      "fps_used": 0.5319148936170213,
+      "fps_used": 0.5555555555555556,
       "n_frames": 5,
       "status": "ok",
       "analysis": {
-        "start_s": 12.4,
-        "end_s": 21.8,
+        "start_s": 124.4,
+        "end_s": 133.8,
         "strokes": [
           {
-            "t_s": 13.1,
+            "t_s": 125.1,
             "player": "far",
             "stroke": "serve",
             "technique_flags": [
@@ -85,7 +85,7 @@
             "tactical_flags": []
           },
           {
-            "t_s": 14.6,
+            "t_s": 126.6,
             "player": "near",
             "stroke": "forehand",
             "technique_flags": [
@@ -98,7 +98,7 @@
             "tactical_flags": []
           },
           {
-            "t_s": 16.2,
+            "t_s": 128.2,
             "player": "far",
             "stroke": "backhand",
             "technique_flags": [],
@@ -111,7 +111,7 @@
             ]
           },
           {
-            "t_s": 18.0,
+            "t_s": 130.0,
             "player": "near",
             "stroke": "forehand",
             "technique_flags": [],
@@ -124,7 +124,7 @@
             ]
           },
           {
-            "t_s": 20.3,
+            "t_s": 132.3,
             "player": "far",
             "stroke": "backhand",
             "technique_flags": [],
@@ -143,11 +143,11 @@
       "n_frames": 5,
       "status": "ok",
       "analysis": {
-        "start_s": 24.0,
-        "end_s": 29.5,
+        "start_s": 870.0,
+        "end_s": 875.5,
         "strokes": [
           {
-            "t_s": 24.7,
+            "t_s": 870.7,
             "player": "near",
             "stroke": "serve",
             "technique_flags": [],
@@ -160,7 +160,7 @@
             ]
           },
           {
-            "t_s": 26.1,
+            "t_s": 872.1,
             "player": "far",
             "stroke": "return",
             "technique_flags": [
@@ -173,7 +173,7 @@
             "tactical_flags": []
           },
           {
-            "t_s": 27.8,
+            "t_s": 873.8,
             "player": "near",
             "stroke": "forehand",
             "technique_flags": [],
@@ -198,18 +198,18 @@
       "n_frames": 2,
       "status": "ok",
       "analysis": {
-        "start_s": 30.2,
-        "end_s": 32.6,
+        "start_s": 1785.2,
+        "end_s": 1787.6,
         "strokes": [
           {
-            "t_s": 30.9,
+            "t_s": 1785.9,
             "player": "near",
             "stroke": "forehand",
             "technique_flags": [],
             "tactical_flags": []
           },
           {
-            "t_s": 31.7,
+            "t_s": 1786.7,
             "player": "far",
             "stroke": "unknown",
             "technique_flags": [
