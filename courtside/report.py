@@ -59,12 +59,22 @@ def aggregate_run_stats(
     segment_s: float,
     clips_ok: int,
     clips_failed: int,
+    total_wall_s: float | None = None,
+    timings: dict[str, float] | None = None,
 ) -> dict[str, Any]:
-    """Roll per-clip timing/token stats into the investor-facing summary line."""
+    """Roll per-clip timing/token stats into the investor-facing summary line.
+
+    ``total_wall_s`` is the true end-to-end elapsed time (segmentation + frame
+    extraction + model load + inference + report generation). Pass it so the
+    headline "processed X in Y" and the realtime factor are honest wall-clock,
+    not just summed inference time (which excludes load/extract/report). When
+    omitted it falls back to inference + segmentation.
+    """
     def _sum(key: str) -> float:
         return sum((s.get(key) or 0) for s in per_clip_stats)
 
-    total_wall = _sum("wall_s") + segment_s
+    inference_s = _sum("wall_s")
+    total_wall = total_wall_s if total_wall_s and total_wall_s > 0 else inference_s + segment_s
     prompt_tokens = int(_sum("prompt_tokens"))
     gen_tokens = int(_sum("generation_tokens"))
     total_tokens = prompt_tokens + gen_tokens
@@ -73,9 +83,10 @@ def aggregate_run_stats(
     realtime_factor = (video_duration_s / total_wall) if total_wall > 0 else None
     cloud_equiv = total_tokens / 1_000_000 * config.CLOUD_INPUT_USD_PER_MTOK
 
-    return {
+    out = {
         "video_duration_s": round(video_duration_s, 1),
         "segment_s": round(segment_s, 1),
+        "inference_wall_s": round(inference_s, 1),
         "total_wall_s": round(total_wall, 1),
         "realtime_factor": round(realtime_factor, 2) if realtime_factor else None,
         "prompt_tokens": prompt_tokens,
@@ -88,6 +99,10 @@ def aggregate_run_stats(
         "clips_ok": clips_ok,
         "clips_failed": clips_failed,
     }
+    if timings:
+        out["timings"] = {k: round(v, 1) for k, v in timings.items()
+                          if isinstance(v, (int, float))}
+    return out
 
 
 def cost_summary_line(run_stats: dict[str, Any]) -> str:
