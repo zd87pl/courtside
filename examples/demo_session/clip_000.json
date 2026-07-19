@@ -1,0 +1,68 @@
+{
+  "start_s": 12.4,
+  "end_s": 21.8,
+  "strokes": [
+    {
+      "t_s": 13.1,
+      "player": "far",
+      "stroke": "serve",
+      "technique_flags": [
+        {
+          "code": "low_ball_toss",
+          "severity": "medium",
+          "evidence": "Toss peaks only just above the extended racquet; contact looks cramped."
+        }
+      ],
+      "tactical_flags": []
+    },
+    {
+      "t_s": 14.6,
+      "player": "near",
+      "stroke": "forehand",
+      "technique_flags": [
+        {
+          "code": "late_preparation",
+          "severity": "high",
+          "evidence": "Racquet is still moving back as the ball crosses the service line; unit turn is late."
+        }
+      ],
+      "tactical_flags": []
+    },
+    {
+      "t_s": 16.2,
+      "player": "far",
+      "stroke": "backhand",
+      "technique_flags": [],
+      "tactical_flags": [
+        {
+          "code": "no_depth_variation",
+          "severity": "medium",
+          "evidence": "Third straight backhand landing near the service line, giving the near player short balls."
+        }
+      ]
+    },
+    {
+      "t_s": 18.0,
+      "player": "near",
+      "stroke": "forehand",
+      "technique_flags": [],
+      "tactical_flags": [
+        {
+          "code": "short_ball_no_approach",
+          "severity": "high",
+          "evidence": "Steps in on a short ball but hits and recovers to the baseline instead of approaching the net."
+        }
+      ]
+    },
+    {
+      "t_s": 20.3,
+      "player": "far",
+      "stroke": "backhand",
+      "technique_flags": [],
+      "tactical_flags": []
+    }
+  ],
+  "rally_summary": "9-shot baseline exchange. Near player rushes a forehand off a short ball rather than approaching; far player defends with high backhands.",
+  "confidence": "high",
+  "notes": ""
+}

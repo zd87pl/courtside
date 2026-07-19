@@ -3,15 +3,21 @@ name = "courtside"
 version = "0.1.0"
 description = "Local tennis video analysis demo on Apple Silicon (MLX) - hybrid rally segmentation + VLM coaching reports"
 requires-python = ">=3.11"
+license = { text = "MIT" }
 dependencies = [
-    "mlx-vlm>=0.5.0",
     "opencv-python-headless>=4.10",
     "numpy>=1.26",
     "pydantic>=2.7",
+    "huggingface_hub>=0.24",
 ]
 
 [project.optional-dependencies]
+# mlx-vlm is Apple-Silicon-only; keeping it out of the core deps means the
+# model-free parts (segmentation, schema, reports) install and test anywhere.
+# Pinned tightly because mlx-vlm's API churns across minor versions.
+local = ["mlx-vlm>=0.6.5,<0.7"]
 server = ["openai>=1.40"]
+dev = ["pytest>=8.0"]
 
 [project.scripts]
 courtside = "courtside.analyze:main"
@@ -23,3 +29,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["courtside"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
