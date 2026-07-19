@@ -1,0 +1,48 @@
+{
+  "start_s": 870.0,
+  "end_s": 875.5,
+  "strokes": [
+    {
+      "t_s": 870.7,
+      "player": "near",
+      "stroke": "serve",
+      "technique_flags": [],
+      "tactical_flags": [
+        {
+          "code": "serve_placement_predictable",
+          "severity": "medium",
+          "evidence": "Second serve to the same body position as the previous point; returner is already leaning."
+        }
+      ]
+    },
+    {
+      "t_s": 872.1,
+      "player": "far",
+      "stroke": "return",
+      "technique_flags": [
+        {
+          "code": "late_preparation",
+          "severity": "medium",
+          "evidence": "Backswing starts after the bounce; contact is behind the front hip."
+        }
+      ],
+      "tactical_flags": []
+    },
+    {
+      "t_s": 873.8,
+      "player": "near",
+      "stroke": "forehand",
+      "technique_flags": [],
+      "tactical_flags": [
+        {
+          "code": "passive_mid_rally",
+          "severity": "medium",
+          "evidence": "Floats a neutral ball back from a mid-court position that invited a stronger shot."
+        }
+      ]
+    }
+  ],
+  "rally_summary": "Serve +1 pattern. Near player serves to the same location twice; short return sits up but is not attacked.",
+  "confidence": "medium",
+  "notes": ""
+}

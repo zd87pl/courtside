@@ -1,5 +1,5 @@
 """courtside CLI - segment a session video, analyze clips with a local VLM,
-and write a coaching report.
+and write a coaching report (Markdown + self-contained HTML).
 
 Examples
 --------
@@ -12,8 +12,14 @@ courtside match.mp4
 # fast smoke test on the first 3 clips with the 8B model:
 courtside match.mp4 --model qwen3-vl-8b --max-clips 3
 
-# flagship stretch config on 128GB (see README for wired-limit sysctl):
-courtside match.mp4 --model qwen3-vl-235b --kv-bits 4 --max-frames 24
+# provably offline (airplane-mode demo): weights must already be cached
+courtside match.mp4 --offline
+
+# re-render reports from a previous run with ZERO model calls (instant demo):
+courtside --from-dir match_courtside
+
+# resume a crashed run, skipping clips already analyzed:
+courtside match.mp4 --resume
 
 # against a running server (mlx_vlm.server / LM Studio), with strict schema:
 courtside match.mp4 --server-url http://localhost:8080/v1 --server-model Qwen/Qwen3-VL-32B-Instruct
@@ -23,66 +29,181 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from . import config
-from .frames import extract_clip_frames, probe_duration
-from .prompts import LIMITATIONS_FOOTER, SYSTEM, build_clip_prompt, build_report_prompt
-from .schema import ClipAnalysis, clip_json_schema
-from .segment import Segment, detect_segments, fixed_windows, from_file
-from .vlm import LocalVLM, ServerVLM, extract_json
+from . import __version__, config, report
+from .fetch import fetch_video, is_url
+from .frames import ClipFrames, extract_clip_frames, probe_duration, require_tools
+from .prompts import SYSTEM, build_clip_prompt, build_report_prompt, limitations_footer
+from .report_html import write_html_report
+from .schema import CANONICAL_FLAG_CODES, ClipAnalysis, clip_json_schema
+from .segment import ActivityCurve, Segment, _activity_curve, detect_segments, fixed_windows, from_file
+from .vlm import LocalVLM, ServerVLM, extract_json, strip_think
+
+_FLAG_VOCAB = ", ".join(sorted(CANONICAL_FLAG_CODES))
 
 
 def _log(msg: str) -> None:
     print(msg, flush=True)
 
 
-def analyze_clip(vlm, clip_frames, schema: dict, max_tokens: int) -> tuple[ClipAnalysis, dict]:
+def _clamp_timestamps(analysis: ClipAnalysis, seg: Segment) -> int:
+    """Clamp each stroke's t_s into the clip window; return #corrections.
+
+    Guards the classic VLM clip-relative-vs-absolute confusion, which otherwise
+    poisons report citations (finding: Stroke.t_s unvalidated)."""
+    fixed = 0
+    lo, hi = seg.start_s, seg.end_s
+    for st in analysis.strokes:
+        if st.t_s < lo or st.t_s > hi:
+            st.t_s = min(max(st.t_s, lo), hi)
+            fixed += 1
+    return fixed
+
+
+def analyze_clip(vlm, clip_frames: ClipFrames, schema: dict, max_tokens: int,
+                 stream: bool = False) -> tuple[ClipAnalysis, dict]:
     seg = clip_frames.segment
     prompt = SYSTEM + "\n\n" + build_clip_prompt(
         n_frames=len(clip_frames.frames),
-        fps=clip_frames.fps_used,
         start_s=seg.start_s,
         end_s=seg.end_s,
         schema=schema,
+        timestamps=clip_frames.timestamps(),
+        flag_vocab=_FLAG_VOCAB,
     )
+    on_token = (lambda t: print(t, end="", flush=True)) if stream else None
     text, stats = vlm.generate(
         prompt, images=clip_frames.frames, max_tokens=max_tokens,
-        temperature=0.0, json_schema=schema,
+        temperature=0.0, json_schema=schema, on_token=on_token,
     )
+    if stream:
+        print(flush=True)
     try:
         parsed = ClipAnalysis.model_validate(extract_json(text))
     except (ValueError, ValidationError) as e:
-        # one repair round: feed the error back, no images needed
+        # one repair round: keep the frames AND the schema in view so the model
+        # can actually correct against them (finding: repair ran without images
+        # or schema).
         _log(f"    ! invalid JSON ({type(e).__name__}), retrying once")
         repair = (
             "Your previous output was invalid JSON for the required schema.\n"
-            f"Error: {e}\n\nPrevious output:\n{text}\n\n"
-            "Return ONLY the corrected JSON object, nothing else."
+            f"Error: {e}\n\nRequired JSON schema:\n{json.dumps(schema)}\n\n"
+            f"Previous output:\n{strip_think(text)[:2000]}\n\n"
+            "Look at the frames again and return ONLY the corrected JSON object, nothing else."
         )
-        text2, stats2 = vlm.generate(repair, images=None, max_tokens=max_tokens,
+        text2, stats2 = vlm.generate(repair, images=clip_frames.frames, max_tokens=max_tokens,
                                      temperature=0.0, json_schema=schema)
         parsed = ClipAnalysis.model_validate(extract_json(text2))
         stats.wall_s += stats2.wall_s
     # trust the pipeline's clip boundaries over the model's
     parsed.start_s, parsed.end_s = seg.start_s, seg.end_s
+    n_fixed = _clamp_timestamps(parsed, seg)
+    if n_fixed:
+        _log(f"    clamped {n_fixed} out-of-window timestamp(s)")
     return parsed, {
         "wall_s": round(stats.wall_s, 2),
         "prompt_tokens": stats.prompt_tokens,
+        "generation_tokens": stats.generation_tokens,
         "prompt_tps": round(stats.prompt_tps, 1) if stats.prompt_tps else None,
         "generation_tps": round(stats.generation_tps, 1) if stats.generation_tps else None,
         "peak_gb": round(stats.peak_gb, 2) if stats.peak_gb else None,
     }
 
 
+def _model_is_cached(repo: str) -> bool:
+    try:
+        from huggingface_hub import snapshot_download
+        snapshot_download(repo, local_files_only=True)
+        return True
+    except Exception:
+        return False
+
+
+def _preflight_model(repo: str, key: str, offline: bool) -> None:
+    """Warn about a cold cache / insufficient RAM before spending minutes on
+    segmentation + extraction (findings: silent 35GB download; no RAM pre-flight)."""
+    weights = config.model_weights_gb(key)
+    ram = config.total_ram_gb()
+    if ram and weights and weights * 1.3 > ram:
+        _log(f"  ! WARNING: {key} needs ~{weights:.0f} GB weights; this machine has "
+             f"~{ram:.0f} GB RAM. Expect Metal OOM or swapping. Consider --model qwen3-vl-8b.")
+    if not _model_is_cached(repo):
+        size = f"~{weights:.0f} GB" if weights else "several GB"
+        if offline:
+            raise SystemExit(
+                f"--offline set but '{repo}' is not in the local Hugging Face cache. "
+                f"Pre-fetch it first: courtside --prefetch {key}"
+            )
+        _log(f"  ! '{repo}' is not cached; the first run will download {size} from Hugging Face.")
+
+
+def _prefetch(repo: str) -> int:
+    from huggingface_hub import snapshot_download
+    _log(f"prefetching {repo} ...")
+    snapshot_download(repo)
+    _log("done - weights are cached; you can now run --offline.")
+    return 0
+
+
+# ---------------- report building ----------------
+
+def _write_reports(out_dir: Path, session_doc: dict, analyses: list[ClipAnalysis],
+                   fps_used_values: list[float], vlm=None) -> None:
+    """Compute facts, (optionally) generate the Markdown report, write HTML."""
+    facts = session_doc["facts"]
+    res_s = report.frame_resolution_s(fps_used_values)
+
+    if vlm is not None and analyses:
+        _log("generating session report ...")
+        session_dicts = [a.model_dump() for a in analyses]
+        report_text, _ = vlm.generate(
+            SYSTEM + "\n\n" + build_report_prompt(session_dicts, facts),
+            images=None, max_tokens=2400, temperature=0.4,
+        )
+        report_text = strip_think(report_text).strip()
+        (out_dir / "session_report.md").write_text(report_text + "\n" + limitations_footer(res_s))
+        _log(f"report written: {out_dir / 'session_report.md'}")
+
+    (out_dir / "session.json").write_text(json.dumps(session_doc, indent=2))
+    html_path = write_html_report(out_dir, session_doc)
+    _log(f"HTML report: {html_path}")
+
+
+def _replay(out_dir: Path) -> int:
+    """Rebuild session.json + HTML from cached clip data - zero model calls."""
+    doc_path = out_dir / "session.json"
+    if not doc_path.exists():
+        _log(f"no session.json in {out_dir} - nothing to replay")
+        return 1
+    session_doc = json.loads(doc_path.read_text())
+    # session.json may predate the envelope format (bare list); wrap minimally.
+    if isinstance(session_doc, list):
+        analyses = [ClipAnalysis.model_validate(c) for c in session_doc]
+        facts = report.compute_session_facts(analyses)
+        session_doc = report.build_session_doc(
+            version=__version__, video_name=out_dir.name, video_duration_s=0.0,
+            model="(unknown)", backend="local", settings={}, created_at=None,
+            run_stats={"total_tokens": None}, facts=facts,
+            clips=[{"index": i, "frame_dir": f"clip_{i:03d}", "fps_used": config.DEFAULT_FPS,
+                    "status": "ok", "analysis": a.model_dump()} for i, a in enumerate(analyses)],
+        )
+    html_path = write_html_report(out_dir, session_doc)
+    _log(f"replayed {out_dir} -> {html_path} (no model loaded)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="courtside", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("video", type=Path)
+    p.add_argument("video", nargs="?",
+                   help="local video file, or a YouTube/any yt-dlp-supported URL")
     p.add_argument("--model", default=config.DEFAULT_MODEL_KEY,
                    help=f"registry key or HF repo/local path (default: {config.DEFAULT_MODEL_KEY}; "
                         f"keys: {', '.join(config.MODELS)})")
@@ -94,27 +215,76 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-side", type=int, default=config.DEFAULT_MAX_SIDE)
     p.add_argument("--max-clips", type=int, default=0, help="limit clips (0 = all)")
     p.add_argument("--max-tokens", type=int, default=1400)
-    p.add_argument("--kv-bits", type=float, default=None, help="KV cache quantization bits (e.g. 4 or 8)")
+    p.add_argument("--kv-bits", type=int, default=None, help="KV cache quantization bits (e.g. 4 or 8)")
     p.add_argument("--out", type=Path, default=None, help="output dir (default: <video>_courtside)")
     p.add_argument("--dry-run", action="store_true", help="segment + extract frames only, no model")
+    p.add_argument("--resume", action="store_true", help="skip clips whose clip_NNN.json already exists")
+    p.add_argument("--from-dir", type=Path, default=None,
+                   help="re-render reports from a previous run dir (no model)")
+    p.add_argument("--prefetch", metavar="MODEL", default=None,
+                   help="download a model's weights to the HF cache and exit")
+    p.add_argument("--download-dir", type=Path, default=None,
+                   help="where URL inputs are downloaded (default: current directory)")
+    p.add_argument("--offline", action="store_true",
+                   help="forbid any network access (weights must be pre-cached)")
+    p.add_argument("--stream", action="store_true", help="echo model tokens live during analysis")
     p.add_argument("--server-url", default=None, help="OpenAI-compatible base URL instead of local load")
     p.add_argument("--server-model", default=None, help="model name for --server-url")
     args = p.parse_args(argv)
 
-    video: Path = args.video
+    if args.offline:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+    if args.prefetch:
+        return _prefetch(config.resolve_model(args.prefetch))
+
+    if args.from_dir:
+        return _replay(args.from_dir)
+
+    if args.video is None:
+        p.error("video is required (or use --from-dir DIR / --prefetch MODEL)")
+
+    if is_url(args.video):
+        if args.offline:
+            p.error("--offline forbids downloading; pass a local file instead of a URL")
+        _log(f"fetching {args.video} ...")
+        try:
+            video = fetch_video(args.video, args.download_dir or Path.cwd(), on_line=_log)
+        except RuntimeError as e:
+            _log(f"error: {e}")
+            return 2
+        _log(f"downloaded: {video.name}")
+    else:
+        video = Path(args.video)
     if not video.exists():
         p.error(f"video not found: {video}")
+    # absolute path: ffmpeg/ffprobe/cv2 would parse a leading-dash filename as
+    # a flag (pathlib normalizes "./-x.mp4" to "-x.mp4", so "./" doesn't help)
+    video = video.resolve()
+
+    try:
+        require_tools()
+    except RuntimeError as e:
+        _log(f"error: {e}")
+        return 2
+
     out_dir = args.out or video.with_name(video.stem + "_courtside")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     duration = probe_duration(video)
     _log(f"video: {video.name}  ({duration/60:.1f} min)")
 
-    # 1) segment
+    # 1) segment (reuse the activity curve for the report timeline)
     t0 = time.perf_counter()
+    curve: ActivityCurve | None = None
     if args.segment == "auto":
+        curve = _activity_curve(video)
         segments = detect_segments(video, min_rally_s=config.DEFAULT_MIN_RALLY_S,
-                                   max_clip_s=config.DEFAULT_MAX_CLIP_S)
+                                   max_clip_s=config.DEFAULT_MAX_CLIP_S, curve=curve)
+        if not segments:
+            _log("  auto-segmentation found nothing usable; falling back to fixed 20s windows")
+            segments = fixed_windows(video, 20.0)
     elif args.segment == "fixed":
         segments = fixed_windows(video, args.window)
     else:
@@ -123,65 +293,136 @@ def main(argv: list[str] | None = None) -> int:
         segments = from_file(args.segments_file)
     if args.max_clips:
         segments = segments[: args.max_clips]
+    segment_s = time.perf_counter() - t0
     _log(f"segments: {len(segments)} active clips "
-         f"({sum(s.duration for s in segments):.0f}s of play, {time.perf_counter()-t0:.1f}s to detect)")
+         f"({sum(s.duration for s in segments):.0f}s of play, {segment_s:.1f}s to detect)")
     if not segments:
-        _log("no active segments found - try --segment fixed")
+        _log("no segments found - try --segment fixed --window 15")
         return 1
+    if curve is not None:
+        (out_dir / "activity.json").write_text(json.dumps({"times": curve.times, "scores": curve.scores}))
+
+    # rough runtime heads-up so a full-match run doesn't silently commit to hours
+    if duration > 0:
+        est_min = sum(s.duration for s in segments) / 60 * 1.5
+        _log(f"  heads-up: ~{len(segments)} clips to analyze (rough order-of-minutes on a big model).")
 
     # 2) frames
-    clips = []
+    clips: list[ClipFrames] = []
     for i, seg in enumerate(segments):
-        cf = extract_clip_frames(video, seg, out_dir / f"clip_{i:03d}",
-                                 fps=args.fps, max_frames=args.max_frames, max_side=args.max_side)
+        try:
+            cf = extract_clip_frames(video, seg, out_dir / f"clip_{i:03d}",
+                                     fps=args.fps, max_frames=args.max_frames, max_side=args.max_side)
+        except Exception as e:  # one bad segment must not abort the run
+            _log(f"  clip {i:03d}  extraction FAILED: {e} - skipping")
+            continue
         clips.append(cf)
         _log(f"  clip {i:03d}  {seg.start_s:7.1f}-{seg.end_s:7.1f}s  {len(cf.frames)} frames @ {cf.fps_used:.2f} fps")
 
     if args.dry_run:
         _log("dry run complete - frames are on disk, no model loaded")
         return 0
+    if not clips:
+        _log("no frames extracted - aborting")
+        return 1
 
-    # 3) VLM
+    # 3) VLM backend
+    backend = "server" if args.server_url else "local"
     if args.server_url:
         if not args.server_model:
             p.error("--server-url requires --server-model")
         vlm = ServerVLM(args.server_url, args.server_model)
-        _log(f"backend: server {args.server_url}  model={args.server_model}")
+        try:
+            vlm.ping()
+        except Exception as e:
+            _log(f"error: cannot reach server {args.server_url}: {e}")
+            return 2
+        model_name = args.server_model
+        _log(f"backend: server {args.server_url}  model={model_name}")
     else:
         repo = config.resolve_model(args.model)
-        _log(f"backend: local mlx-vlm  model={repo}  (loading...)")
-        vlm = LocalVLM(repo, kv_bits=args.kv_bits)
+        _preflight_model(repo, args.model, args.offline)
+        _log(f"backend: local mlx-vlm  model={repo}  (loading, this can take a minute...)")
+        try:
+            vlm = LocalVLM(repo, kv_bits=args.kv_bits)
+        except ImportError:
+            _log("error: mlx-vlm is not installed. On Apple Silicon: pip install -e '.[local]'. "
+                 "Off-Mac, use --server-url against an OpenAI-compatible endpoint.")
+            return 2
+        model_name = repo
         _log(f"loaded in {vlm.load_s:.1f}s")
 
     schema = clip_json_schema()
     analyses: list[ClipAnalysis] = []
+    per_clip_stats: list[dict] = []
+    clip_records: list[dict] = []
+    clips_failed = 0
+    interrupted = False
     try:
         for i, cf in enumerate(clips):
+            clip_json_path = out_dir / f"clip_{i:03d}.json"
+            if args.resume and clip_json_path.exists():
+                try:
+                    analysis = ClipAnalysis.model_validate_json(clip_json_path.read_text())
+                    analyses.append(analysis)
+                    clip_records.append({"index": i, "frame_dir": f"clip_{i:03d}",
+                                         "fps_used": cf.fps_used, "n_frames": len(cf.frames),
+                                         "status": "ok", "analysis": analysis.model_dump()})
+                    _log(f"[{i+1}/{len(clips)}] resume: reusing {clip_json_path.name}")
+                    continue
+                except (ValueError, ValidationError):
+                    pass  # fall through to re-analyze
             _log(f"[{i+1}/{len(clips)}] analyzing clip {cf.segment.start_s:.1f}-{cf.segment.end_s:.1f}s ...")
-            analysis, stats = analyze_clip(vlm, cf, schema, args.max_tokens)
+            try:
+                analysis, stats = analyze_clip(vlm, cf, schema, args.max_tokens, stream=args.stream)
+            except KeyboardInterrupt:
+                interrupted = True
+                _log("\n  interrupted - finishing with the clips completed so far")
+                break
+            except Exception as e:  # per-clip recovery: never let one clip kill the run
+                clips_failed += 1
+                _log(f"    ! clip {i:03d} failed: {type(e).__name__}: {e} - skipping")
+                clip_records.append({"index": i, "frame_dir": f"clip_{i:03d}", "fps_used": cf.fps_used,
+                                     "n_frames": len(cf.frames), "status": "failed",
+                                     "error": f"{type(e).__name__}: {e}", "analysis": None})
+                continue
             analyses.append(analysis)
-            (out_dir / f"clip_{i:03d}.json").write_text(analysis.model_dump_json(indent=2))
+            per_clip_stats.append(stats)
+            clip_json_path.write_text(analysis.model_dump_json(indent=2))
+            clip_records.append({"index": i, "frame_dir": f"clip_{i:03d}", "fps_used": cf.fps_used,
+                                 "n_frames": len(cf.frames), "status": "ok", "analysis": analysis.model_dump()})
             n_flags = sum(len(s.technique_flags) + len(s.tactical_flags) for s in analysis.strokes)
             _log(f"    {len(analysis.strokes)} strokes, {n_flags} flags, conf={analysis.confidence}  "
                  f"({stats['wall_s']}s, prefill {stats['prompt_tps'] or '?'} t/s, "
                  f"decode {stats['generation_tps'] or '?'} t/s, peak {stats['peak_gb'] or '?'} GB)")
 
-        # 4) report (text-only pass on the same model)
-        session = [a.model_dump() for a in analyses]
-        (out_dir / "session.json").write_text(json.dumps(session, indent=2))
-        _log("generating session report ...")
-        report_text, rstats = vlm.generate(
-            SYSTEM + "\n\n" + build_report_prompt(session),
-            images=None, max_tokens=2400, temperature=0.4,
+        # 4) reports - always reached, built from whatever succeeded
+        if not analyses:
+            _log("no clips analyzed successfully - no report generated")
+            return 1
+
+        facts = report.compute_session_facts(analyses)
+        run_stats = report.aggregate_run_stats(
+            per_clip_stats, video_duration_s=duration, segment_s=segment_s,
+            clips_ok=len(analyses), clips_failed=clips_failed,
         )
-        report_path = out_dir / "session_report.md"
-        report_path.write_text(report_text.strip() + "\n" + LIMITATIONS_FOOTER)
-        _log(f"report written: {report_path}  ({rstats.wall_s:.1f}s)")
+        session_doc = report.build_session_doc(
+            version=__version__, video_name=video.name, video_duration_s=duration,
+            model=model_name, backend=backend,
+            settings={"fps": args.fps, "max_frames": args.max_frames, "max_side": args.max_side,
+                      "segment": args.segment, "kv_bits": args.kv_bits},
+            created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            run_stats=run_stats, facts=facts, clips=clip_records,
+        )
+        fps_used_values = [c["fps_used"] for c in clip_records if c.get("fps_used")]
+        _write_reports(out_dir, session_doc, analyses, fps_used_values, vlm=vlm)
+        _log("\n" + report.cost_summary_line(run_stats))
     finally:
         vlm.close()
 
     total_strokes = sum(len(a.strokes) for a in analyses)
-    _log(f"done: {len(analyses)} clips, {total_strokes} strokes -> {out_dir}")
+    tail = " (interrupted)" if interrupted else ""
+    _log(f"done{tail}: {len(analyses)} clips, {total_strokes} strokes, {clips_failed} skipped -> {out_dir}")
     return 0
 
 

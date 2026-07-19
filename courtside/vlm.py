@@ -16,7 +16,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass
@@ -24,6 +24,7 @@ class GenStats:
     load_s: float = 0.0
     wall_s: float = 0.0
     prompt_tokens: int | None = None
+    generation_tokens: int | None = None
     prompt_tps: float | None = None
     generation_tps: float | None = None
     peak_gb: float | None = None
@@ -69,6 +70,7 @@ class LocalVLM:
         max_tokens: int = 1200,
         temperature: float = 0.0,
         json_schema: dict | None = None,  # unused locally; kept for interface parity
+        on_token: Callable[[str], None] | None = None,
     ) -> tuple[str, GenStats]:
         from mlx_vlm import stream_generate
         from mlx_vlm.prompt_utils import apply_chat_template
@@ -81,7 +83,9 @@ class LocalVLM:
         if images:
             kwargs["image"] = [str(p) for p in images]
         if self.kv_bits:
-            kwargs["kv_bits"] = self.kv_bits
+            # KV-cache quantization bits are an integer count (finding: --kv-bits
+            # was passed through as a float).
+            kwargs["kv_bits"] = int(self.kv_bits)
 
         _reset_peak_memory()
         chunks: list[str] = []
@@ -89,6 +93,8 @@ class LocalVLM:
         t0 = time.perf_counter()
         for chunk in stream_generate(self.model, self.processor, formatted, **kwargs):
             chunks.append(chunk.text)
+            if on_token is not None:
+                on_token(chunk.text)
             last = chunk
         wall = time.perf_counter() - t0
 
@@ -96,6 +102,7 @@ class LocalVLM:
             load_s=self.load_s,
             wall_s=wall,
             prompt_tokens=getattr(last, "prompt_tokens", None),
+            generation_tokens=getattr(last, "generation_tokens", None),
             prompt_tps=getattr(last, "prompt_tps", None),
             generation_tps=getattr(last, "generation_tps", None),
             peak_gb=_peak_memory_gb(),
@@ -103,11 +110,16 @@ class LocalVLM:
         return "".join(chunks), stats
 
     def close(self) -> None:
-        del self.model, self.processor
+        for attr in ("model", "processor"):
+            if hasattr(self, attr):
+                delattr(self, attr)
         gc.collect()
         try:
             import mlx.core as mx
-            mx.clear_cache()
+            try:
+                mx.clear_cache()
+            except AttributeError:
+                mx.metal.clear_cache()
         except Exception:
             pass
 
@@ -115,12 +127,16 @@ class LocalVLM:
 class ServerVLM:
     """OpenAI-compatible client. Local files are sent as base64 data URLs."""
 
-    def __init__(self, base_url: str, model: str, api_key: str = "not-needed"):
+    def __init__(self, base_url: str, model: str, api_key: str = "not-needed", timeout: float = 120.0):
         from openai import OpenAI  # optional dependency: pip install .[server]
 
-        self.client = OpenAI(base_url=base_url, api_key=api_key)
+        self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         self.model = model
         self.load_s = 0.0
+
+    def ping(self) -> None:
+        """Fail fast if the server is unreachable (finding: dead server hangs)."""
+        self.client.models.list()
 
     @staticmethod
     def _data_url(path: Path) -> str:
@@ -134,6 +150,7 @@ class ServerVLM:
         max_tokens: int = 1200,
         temperature: float = 0.0,
         json_schema: dict | None = None,
+        on_token: Callable[[str], None] | None = None,  # accepted for parity; server path is non-streaming
     ) -> tuple[str, GenStats]:
         content: list[dict] = [{"type": "text", "text": prompt}]
         for p in images or []:
@@ -159,6 +176,7 @@ class ServerVLM:
         stats = GenStats(
             wall_s=wall,
             prompt_tokens=getattr(usage, "prompt_tokens", None) if usage else None,
+            generation_tokens=getattr(usage, "completion_tokens", None) if usage else None,
         )
         return text, stats
 
@@ -169,11 +187,29 @@ class ServerVLM:
 # ---------- JSON extraction / repair ----------
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+_THINK_PAIR_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def strip_think(text: str) -> str:
+    """Remove reasoning blocks emitted by thinking models.
+
+    Handles three shapes (finding: <think> leaks / unclosed tags break parsing):
+      1. well-paired  <think>...</think>
+      2. close-only   ...</think>REAL   (template pre-filled the opening tag)
+      3. open-only    <think>REAL...    (truncated before closing - reasoning
+                       is discarded; if nothing follows, the caller sees empty)
+    """
+    text = _THINK_PAIR_RE.sub("", text)
+    if "</think>" in text:  # close-only: keep everything after the last close
+        text = text.rsplit("</think>", 1)[1]
+    if "<think>" in text:  # open-only with no close: drop from the tag onward
+        text = text.split("<think>", 1)[0]
+    return text.strip()
 
 
 def extract_json(text: str) -> dict:
     """Best-effort: strip fences / thinking blocks, grab outermost object."""
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = strip_think(text)
     m = _FENCE_RE.search(text)
     if m:
         text = m.group(1)

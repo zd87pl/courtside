@@ -1,0 +1,29 @@
+{
+  "start_s": 1785.2,
+  "end_s": 1787.6,
+  "strokes": [
+    {
+      "t_s": 1785.9,
+      "player": "near",
+      "stroke": "forehand",
+      "technique_flags": [],
+      "tactical_flags": []
+    },
+    {
+      "t_s": 1786.7,
+      "player": "far",
+      "stroke": "unknown",
+      "technique_flags": [
+        {
+          "code": "no_split_step",
+          "severity": "low",
+          "evidence": "No visible split step before moving, though the far player is partly out of frame."
+        }
+      ],
+      "tactical_flags": []
+    }
+  ],
+  "rally_summary": "Brief point, partial occlusion of the far player at contact. Two strokes visible.",
+  "confidence": "low",
+  "notes": ""
+}

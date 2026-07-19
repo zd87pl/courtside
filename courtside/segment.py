@@ -30,12 +30,36 @@ class Segment:
         return self.end_s - self.start_s
 
 
-def _activity_curve(video_path: Path, sample_fps: float = 5.0, width: int = 320):
+@dataclass
+class ActivityCurve:
+    """Motion-energy trace kept for the report timeline (segment.py:3-11)."""
+
+    times: list[float]
+    scores: list[float]
+    duration: float
+
+
+def _probe_duration_cv(cap: "cv2.VideoCapture", src_fps: float, times: list[float]) -> float:
+    """Duration in seconds, robust to containers that report frame_count <= 0.
+
+    Some webm/variable-frame-rate files return -1 or 0 for CAP_PROP_FRAME_COUNT,
+    which would otherwise yield a zero/negative duration and silently drop every
+    segment (finding: segment.py CAP_PROP_FRAME_COUNT can be -1/0).
+    """
+    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if n_frames > 0 and src_fps > 0:
+        return n_frames / src_fps
+    # fall back to the last sampled timestamp (better than 0)
+    return times[-1] if times else 0.0
+
+
+def _activity_curve(video_path: Path, sample_fps: float = 5.0, width: int = 320) -> ActivityCurve:
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
     src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if src_fps <= 0:
+        src_fps = 30.0
     stride = max(1, round(src_fps / sample_fps))
 
     times: list[float] = []
@@ -58,10 +82,10 @@ def _activity_curve(video_path: Path, sample_fps: float = 5.0, width: int = 320)
                 times.append(idx / src_fps)
             prev = gray
         idx += 1
-    cap.release()
 
-    duration = (n_frames / src_fps) if n_frames else (times[-1] if times else 0.0)
-    return np.asarray(times), np.asarray(scores), duration
+    duration = _probe_duration_cv(cap, src_fps, times)
+    cap.release()
+    return ActivityCurve(times=times, scores=scores, duration=duration)
 
 
 def detect_segments(
@@ -72,9 +96,20 @@ def detect_segments(
     pad_s: float = 0.5,
     enter_frac: float = 0.35,
     exit_frac: float = 0.15,
+    min_active_frac: float = 0.90,
+    curve: ActivityCurve | None = None,
 ) -> list[Segment]:
-    """Hysteresis thresholding of the motion-energy curve."""
-    times, scores, duration = _activity_curve(video_path)
+    """Hysteresis thresholding of the motion-energy curve.
+
+    ``min_active_frac`` guards against the constant-motion failure mode: with a
+    purely relative threshold, footage from a moving/handheld camera (or any
+    clip with no quiet baseline) reads as active for essentially its whole
+    length. If a single detected segment covers more than this fraction of the
+    video, the detector is untrustworthy and we return [] so the caller can
+    fall back to fixed windows (finding: purely relative hysteresis thresholds).
+    """
+    ac = curve if curve is not None else _activity_curve(video_path)
+    times, scores, duration = ac.times, ac.scores, ac.duration
     if len(scores) == 0:
         return []
 
@@ -101,26 +136,42 @@ def detect_segments(
         else:
             merged.append(seg)
 
+    # constant-motion sanity check: one blob spanning ~the whole video is a
+    # detector misfire, not a single giant rally.
+    if duration > 0 and merged:
+        covered = sum(s.duration for s in merged)
+        if covered >= min_active_frac * duration and len(merged) <= 1:
+            return []
+
     # pad, clamp, drop short, split long
     final: list[Segment] = []
     for seg in merged:
         s = max(0.0, seg.start_s - pad_s)
-        e = min(duration, seg.end_s + pad_s)
+        e = min(duration, seg.end_s + pad_s) if duration > 0 else seg.end_s + pad_s
         if e - s < min_rally_s:
             continue
+        # split overly long spans, but keep the trailing remainder only if it
+        # still clears the minimum (finding: splitter emitted sub-min tails).
         while e - s > max_clip_s:
             final.append(Segment(s, s + max_clip_s))
             s += max_clip_s
-        final.append(Segment(s, e))
+        if e - s >= min_rally_s:
+            final.append(Segment(s, e))
     return final
 
 
 def fixed_windows(video_path: Path, window_s: float) -> list[Segment]:
+    if window_s <= 0:
+        raise ValueError(f"window_s must be positive, got {window_s}")
     cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if fps <= 0:
+        fps = 30.0
+    times: list[float] = []
+    duration = _probe_duration_cv(cap, fps, times)
     cap.release()
-    duration = n / fps if n else 0.0
     out, t = [], 0.0
     while t < duration:
         out.append(Segment(t, min(t + window_s, duration)))
@@ -129,12 +180,23 @@ def fixed_windows(video_path: Path, window_s: float) -> list[Segment]:
 
 
 def from_file(path: Path) -> list[Segment]:
-    """Load segments from JSON: [[start_s, end_s], ...] or [{"start_s":..,"end_s":..}, ...]."""
+    """Load segments from JSON: [[start_s, end_s], ...] or [{"start_s":..,"end_s":..}, ...].
+
+    Entries are validated: start/end must be finite, non-negative, and end must
+    exceed start (finding: from_file segments were not validated or clamped).
+    """
+    import math
+
     data = json.loads(Path(path).read_text())
-    segs = []
-    for item in data:
+    segs: list[Segment] = []
+    for i, item in enumerate(data):
         if isinstance(item, dict):
-            segs.append(Segment(float(item["start_s"]), float(item["end_s"])))
+            start, end = float(item["start_s"]), float(item["end_s"])
         else:
-            segs.append(Segment(float(item[0]), float(item[1])))
+            start, end = float(item[0]), float(item[1])
+        if not (math.isfinite(start) and math.isfinite(end)):
+            raise ValueError(f"segment {i}: non-finite bounds ({start}, {end})")
+        if start < 0 or end <= start:
+            raise ValueError(f"segment {i}: need 0 <= start < end, got ({start}, {end})")
+        segs.append(Segment(start, end))
     return segs

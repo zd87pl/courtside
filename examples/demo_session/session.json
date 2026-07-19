@@ -1,0 +1,231 @@
+{
+  "courtside_version": "0.1.0",
+  "video": "practice_2026-07-18.mp4",
+  "video_duration_s": 2304.0,
+  "model": "mlx-community/Qwen3-VL-32B-Instruct-8bit",
+  "backend": "local",
+  "settings": {
+    "fps": 4.0,
+    "max_frames": 32,
+    "max_side": 784,
+    "segment": "auto",
+    "kv_bits": null
+  },
+  "created_at": "2026-07-18T17:32:11+00:00",
+  "on_device": true,
+  "run_stats": {
+    "video_duration_s": 2304.0,
+    "segment_s": 18.0,
+    "total_wall_s": 208.0,
+    "realtime_factor": 11.08,
+    "prompt_tokens": 284000,
+    "generation_tokens": 6800,
+    "total_tokens": 290800,
+    "peak_gb": 41.6,
+    "cloud_equiv_usd": 0.87,
+    "on_device_usd": 0.0,
+    "bytes_uploaded": 0,
+    "clips_ok": 3,
+    "clips_failed": 0
+  },
+  "facts": {
+    "clips_analyzed": 3,
+    "total_strokes": 10,
+    "player_split": {
+      "near": 5,
+      "far": 5,
+      "unknown": 0
+    },
+    "stroke_mix": {
+      "forehand": 4,
+      "serve": 2,
+      "backhand": 2,
+      "return": 1,
+      "unknown": 1
+    },
+    "top_technique_flags": {
+      "late_preparation": 2,
+      "low_ball_toss": 1,
+      "no_split_step": 1
+    },
+    "top_tactical_flags": {
+      "no_depth_variation": 1,
+      "short_ball_no_approach": 1,
+      "serve_placement_predictable": 1,
+      "passive_mid_rally": 1
+    },
+    "confidence_distribution": {
+      "high": 1,
+      "medium": 1,
+      "low": 1
+    }
+  },
+  "clips": [
+    {
+      "index": 0,
+      "frame_dir": "clip_000",
+      "fps_used": 0.5555555555555556,
+      "n_frames": 5,
+      "status": "ok",
+      "analysis": {
+        "start_s": 124.4,
+        "end_s": 133.8,
+        "strokes": [
+          {
+            "t_s": 125.1,
+            "player": "far",
+            "stroke": "serve",
+            "technique_flags": [
+              {
+                "code": "low_ball_toss",
+                "severity": "medium",
+                "evidence": "Toss peaks only just above the extended racquet; contact looks cramped."
+              }
+            ],
+            "tactical_flags": []
+          },
+          {
+            "t_s": 126.6,
+            "player": "near",
+            "stroke": "forehand",
+            "technique_flags": [
+              {
+                "code": "late_preparation",
+                "severity": "high",
+                "evidence": "Racquet is still moving back as the ball crosses the service line; unit turn is late."
+              }
+            ],
+            "tactical_flags": []
+          },
+          {
+            "t_s": 128.2,
+            "player": "far",
+            "stroke": "backhand",
+            "technique_flags": [],
+            "tactical_flags": [
+              {
+                "code": "no_depth_variation",
+                "severity": "medium",
+                "evidence": "Third straight backhand landing near the service line, giving the near player short balls."
+              }
+            ]
+          },
+          {
+            "t_s": 130.0,
+            "player": "near",
+            "stroke": "forehand",
+            "technique_flags": [],
+            "tactical_flags": [
+              {
+                "code": "short_ball_no_approach",
+                "severity": "high",
+                "evidence": "Steps in on a short ball but hits and recovers to the baseline instead of approaching the net."
+              }
+            ]
+          },
+          {
+            "t_s": 132.3,
+            "player": "far",
+            "stroke": "backhand",
+            "technique_flags": [],
+            "tactical_flags": []
+          }
+        ],
+        "rally_summary": "9-shot baseline exchange. Near player rushes a forehand off a short ball rather than approaching; far player defends with high backhands.",
+        "confidence": "high",
+        "notes": ""
+      }
+    },
+    {
+      "index": 1,
+      "frame_dir": "clip_001",
+      "fps_used": 0.9090909090909091,
+      "n_frames": 5,
+      "status": "ok",
+      "analysis": {
+        "start_s": 870.0,
+        "end_s": 875.5,
+        "strokes": [
+          {
+            "t_s": 870.7,
+            "player": "near",
+            "stroke": "serve",
+            "technique_flags": [],
+            "tactical_flags": [
+              {
+                "code": "serve_placement_predictable",
+                "severity": "medium",
+                "evidence": "Second serve to the same body position as the previous point; returner is already leaning."
+              }
+            ]
+          },
+          {
+            "t_s": 872.1,
+            "player": "far",
+            "stroke": "return",
+            "technique_flags": [
+              {
+                "code": "late_preparation",
+                "severity": "medium",
+                "evidence": "Backswing starts after the bounce; contact is behind the front hip."
+              }
+            ],
+            "tactical_flags": []
+          },
+          {
+            "t_s": 873.8,
+            "player": "near",
+            "stroke": "forehand",
+            "technique_flags": [],
+            "tactical_flags": [
+              {
+                "code": "passive_mid_rally",
+                "severity": "medium",
+                "evidence": "Floats a neutral ball back from a mid-court position that invited a stronger shot."
+              }
+            ]
+          }
+        ],
+        "rally_summary": "Serve +1 pattern. Near player serves to the same location twice; short return sits up but is not attacked.",
+        "confidence": "medium",
+        "notes": ""
+      }
+    },
+    {
+      "index": 2,
+      "frame_dir": "clip_002",
+      "fps_used": 1.0,
+      "n_frames": 2,
+      "status": "ok",
+      "analysis": {
+        "start_s": 1785.2,
+        "end_s": 1787.6,
+        "strokes": [
+          {
+            "t_s": 1785.9,
+            "player": "near",
+            "stroke": "forehand",
+            "technique_flags": [],
+            "tactical_flags": []
+          },
+          {
+            "t_s": 1786.7,
+            "player": "far",
+            "stroke": "unknown",
+            "technique_flags": [
+              {
+                "code": "no_split_step",
+                "severity": "low",
+                "evidence": "No visible split step before moving, though the far player is partly out of frame."
+              }
+            ],
+            "tactical_flags": []
+          }
+        ],
+        "rally_summary": "Brief point, partial occlusion of the far player at contact. Two strokes visible.",
+        "confidence": "low",
+        "notes": ""
+      }
+    }
+  ]
+}

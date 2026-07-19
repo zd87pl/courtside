@@ -11,6 +11,7 @@ convert locally:  python -m mlx_vlm.convert --hf-path <org/model> -q --q-bits 8
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 
@@ -33,13 +34,13 @@ MODELS: dict[str, ModelSpec] = {
         key="qwen3-vl-32b-thinking",
         repo="mlx-community/Qwen3-VL-32B-Thinking-8bit",
         approx_weights_gb=35,
-        notes="Reasoning variant; use --enable-thinking ideas via prompt, slower but better on tactics.",
+        notes="Reasoning variant; slower but better on tactics. Report pass strips <think> blocks.",
     ),
     "qwen3-vl-30b-a3b": ModelSpec(
         key="qwen3-vl-30b-a3b",
         repo="mlx-community/Qwen3-VL-30B-A3B-Instruct-8bit",
         approx_weights_gb=32,
-        notes="MoE (3B active): fastest decode of the big options, great for iteration.",
+        notes="MoE (3B active): fastest decode of the big options, great for iteration and live demos.",
     ),
     "qwen3-vl-8b": ModelSpec(
         key="qwen3-vl-8b",
@@ -76,8 +77,27 @@ DEFAULT_MAX_SIDE = 784  # long-side pixels per frame sent to the VLM
 DEFAULT_MIN_RALLY_S = 2.5
 DEFAULT_MAX_CLIP_S = 45.0
 
+# Rough blended cloud price for a frontier multimodal API ($ per 1M input
+# tokens) used only to frame the on-device cost story in the report. Deliberately
+# conservative; adjust to whatever comparator you cite to investors.
+CLOUD_INPUT_USD_PER_MTOK = 3.0
+
 
 def resolve_model(key_or_repo: str) -> str:
     """Accept either a registry key or a raw HF repo id / local path."""
     spec = MODELS.get(key_or_repo)
     return spec.repo if spec else key_or_repo
+
+
+def model_weights_gb(key_or_repo: str) -> float | None:
+    """Approx weight size for a registry key, or None for an unknown repo/path."""
+    spec = MODELS.get(key_or_repo)
+    return spec.approx_weights_gb if spec else None
+
+
+def total_ram_gb() -> float | None:
+    """Total physical RAM in GB, or None if it can't be determined."""
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1 << 30)
+    except (ValueError, OSError, AttributeError):
+        return None
