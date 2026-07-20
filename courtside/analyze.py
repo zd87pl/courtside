@@ -249,8 +249,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--offline", action="store_true",
                    help="forbid any network access (weights must be pre-cached)")
     p.add_argument("--stream", action="store_true", help="echo model tokens live during analysis")
-    p.add_argument("--server-url", default=None, help="OpenAI-compatible base URL instead of local load")
+    p.add_argument("--server-url", default=None, help="OpenAI-compatible base URL instead of local load "
+                   "(e.g. https://openrouter.ai/api/v1)")
     p.add_argument("--server-model", default=None, help="model name for --server-url")
+    p.add_argument("--api-key", default=None,
+                   help="API key for --server-url (default: $OPENROUTER_API_KEY or $OPENAI_API_KEY)")
     args = p.parse_args(argv)
 
     if args.offline:
@@ -353,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.server_url:
         if not args.server_model:
             p.error("--server-url requires --server-model")
-        vlm = ServerVLM(args.server_url, args.server_model)
+        vlm = ServerVLM(args.server_url, args.server_model, api_key=args.api_key)
         try:
             vlm.ping()
         except Exception as e:
@@ -434,13 +437,15 @@ def main(argv: list[str] | None = None) -> int:
             _log("no clips analyzed successfully - no report generated")
             if backend == "local":
                 _log(
-                    "  hint: if the model returned <empty output>, the "
-                    f"{args.max_frames}-frame prefill at {args.max_side}px likely hit this "
-                    "Mac's GPU memory limit. Try a lighter config:\n"
-                    "    courtside <video> --model qwen3-vl-8b --max-frames 12 --max-side 672\n"
-                    "  or raise the wired limit (see README): "
-                    "sudo sysctl iogpu.wired_limit_mb=<~90% of RAM in MB>\n"
-                    "  raw model output for each clip was saved to clip_NNN.raw.txt for inspection."
+                    "  hint: run `courtside-doctor` to isolate this in one shot (it tests\n"
+                    "  1/8/32-frame generation directly and prints a specific diagnosis).\n"
+                    "  Common causes: an mlx-vlm >=0.6.4 Qwen regression (workaround:\n"
+                    "  pip install --force-reinstall --no-deps 'mlx-vlm==0.6.3'), or the\n"
+                    f"  {args.max_frames}-frame prefill exceeding GPU memory (try --max-frames 12\n"
+                    "  --max-side 672, or raise iogpu.wired_limit_mb - see README).\n"
+                    "  Cloud fallback: courtside <video> --server-url https://openrouter.ai/api/v1 \\\n"
+                    "    --server-model qwen/qwen2.5-vl-72b-instruct   (needs $OPENROUTER_API_KEY)\n"
+                    "  raw model output for each clip was saved to clip_NNN.raw.txt."
                 )
             return 1
 
@@ -461,6 +466,7 @@ def main(argv: list[str] | None = None) -> int:
             total_wall_s=total_wall_s,
             timings={"segment_s": segment_s, "extract_s": extract_s,
                      "model_load_s": model_load_s, "report_s": report_s},
+            on_device=(backend == "local"),
         )
         session_doc = report.build_session_doc(
             version=__version__, video_name=video.name, video_duration_s=duration,

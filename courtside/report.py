@@ -61,6 +61,7 @@ def aggregate_run_stats(
     clips_failed: int,
     total_wall_s: float | None = None,
     timings: dict[str, float] | None = None,
+    on_device: bool = True,
 ) -> dict[str, Any]:
     """Roll per-clip timing/token stats into the investor-facing summary line.
 
@@ -94,8 +95,10 @@ def aggregate_run_stats(
         "total_tokens": total_tokens,
         "peak_gb": round(peak_gb, 2) if peak_gb else None,
         "cloud_equiv_usd": round(cloud_equiv, 2),
-        "on_device_usd": 0.0,
-        "bytes_uploaded": 0,
+        # the $0 / 0-bytes claims are only true for local runs; a server
+        # backend uploads every frame, so never assert them there
+        "on_device_usd": 0.0 if on_device else None,
+        "bytes_uploaded": 0 if on_device else None,
         "clips_ok": clips_ok,
         "clips_failed": clips_failed,
     }
@@ -106,16 +109,21 @@ def aggregate_run_stats(
 
 
 def cost_summary_line(run_stats: dict[str, Any]) -> str:
-    """The one line the whole demo is arguing for."""
+    """The one line the whole demo is arguing for - honest for both backends."""
     dur_min = run_stats["video_duration_s"] / 60
     wall_min = run_stats["total_wall_s"] / 60
     rt = run_stats.get("realtime_factor")
     rt_str = f"{rt}x realtime" if rt else "n/a"
     tok_k = run_stats["total_tokens"] / 1000
-    return (
-        f"Processed {dur_min:.1f} min of footage in {wall_min:.1f} min ({rt_str}) - "
-        f"{tok_k:.0f}k tokens - cloud-API equivalent ~ ${run_stats['cloud_equiv_usd']:.2f}, "
-        f"on-device cost ${run_stats['on_device_usd']:.2f}, {run_stats['bytes_uploaded']} bytes uploaded."
+    head = (f"Processed {dur_min:.1f} min of footage in {wall_min:.1f} min ({rt_str}) - "
+            f"{tok_k:.0f}k tokens - ")
+    if run_stats.get("bytes_uploaded") == 0:
+        return head + (
+            f"cloud-API equivalent ~ ${run_stats['cloud_equiv_usd']:.2f}, "
+            f"on-device cost ${run_stats['on_device_usd']:.2f}, 0 bytes uploaded."
+        )
+    return head + (
+        f"via cloud API (frames uploaded), est. ~ ${run_stats['cloud_equiv_usd']:.2f}."
     )
 
 

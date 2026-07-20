@@ -177,9 +177,13 @@ def test_analyze_argv_uses_end_of_options_separator(tmp_path):
 
 def test_form_field_whitelist():
     from courtside.webapp import ALLOWED_FORM_FIELDS
+    # a raw server_url is never accepted from a form: the only cloud path is
+    # the explicit use_openrouter flag, whose URL is a server-side constant
     assert "server_url" not in ALLOWED_FORM_FIELDS
+    assert "server_model" not in ALLOWED_FORM_FIELDS
     assert "download_dir" not in ALLOWED_FORM_FIELDS  # set internally, never from the form
-    assert {"video", "model", "quick", "offline", "dry_run"} == ALLOWED_FORM_FIELDS
+    assert {"video", "model", "quick", "offline", "dry_run",
+            "use_openrouter", "cloud_model"} == ALLOWED_FORM_FIELDS
 
 
 def test_cancel_terminates_running_analysis():
