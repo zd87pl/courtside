@@ -658,6 +658,10 @@ def render_session(ref) -> str:
 
     parts.append(_timeline(sid, doc, activity))
 
+    cq = _dget(_dget(doc, "contact_quality") or {}, "summary") or {}
+    if cq.get("strokes_measured"):
+        parts.append(_contact_quality_panel(cq))
+
     def img_url(fp: Path) -> str | None:
         try:
             rel = fp.relative_to(sdir)
@@ -726,6 +730,45 @@ def render_session(ref) -> str:
         parts.append(f'<div class="card rep">{_md_to_html(md.read_text())}</div>')
 
     return _page(ref.title, "".join(parts), crumb="session")
+
+
+_CQ_COLORS = {"ideal": "var(--good)", "acceptable": "var(--warn)", "poor": "var(--crit)"}
+
+
+def _contact_quality_panel(cq: dict) -> str:
+    """Strike-zone success factor: ball height at contact, session-wide."""
+    rows = []
+    by_type = _dget(cq, "by_type") or {}
+    for st, counts in by_type.items():
+        if not isinstance(counts, dict):
+            continue
+        total = sum(_num(v) for v in counts.values()) or 1
+        segs = "".join(
+            f'<div data-tip="{q}: {int(_num(counts.get(q)))}" '
+            f'style="width:{100 * _num(counts.get(q)) / total:.1f}%;background:{_CQ_COLORS[q]}"></div>'
+            for q in ("ideal", "acceptable", "poor") if _num(counts.get(q)) > 0)
+        rows.append(
+            f'<div style="display:flex;align-items:center;gap:12px;margin:7px 0">'
+            f'<span style="width:120px;font-size:12.5px;color:var(--ink-2)">{_e(st)}</span>'
+            f'<div style="flex:1;display:flex;height:14px;border-radius:7px;overflow:hidden;'
+            f'border:1px solid var(--border-2)">{segs}</div>'
+            f'<span class="tnum" style="width:34px;text-align:right;font-size:12px;color:var(--muted)">'
+            f'{int(total)}</span></div>')
+    legend = "".join(f'<span><span class="sw" style="background:{c}"></span>{q}</span>'
+                     for q, c in _CQ_COLORS.items())
+    return f"""
+<div class="card"><h2>Contact height &mdash; strike zone</h2>
+  <p class="hint">Ball height at contact relative to the player's own body zones
+  (2D image-plane; wrist proxy when the ball isn't detected). Groundstroke ideal: hip-to-chest.</p>
+  <div style="display:flex;gap:22px;align-items:center;margin-bottom:10px">
+    <span class="stat" style="margin:0"><b class="tnum" style="font-size:26px;display:block;
+      color:var(--accent)">{_e(cq.get("pct_ideal", 0))}%</b>
+      <span style="font-size:12px;color:var(--ink-2)">strokes in the ideal zone</span></span>
+    <span class="crumb tnum">{_e(cq.get("strokes_measured", 0))} strokes measured</span>
+  </div>
+  {"".join(rows)}
+  <div class="legend">{legend}</div>
+</div>"""
 
 
 def _court_panel(cm: dict) -> str:
@@ -802,6 +845,14 @@ def _moment_card(sid: str, m: dict) -> str:
 
     angles = _dget(m, "angles") or {}
     chips = []
+    ch = _dget(m, "contact_height") or {}
+    if _dget(ch, "zone"):
+        q = str(_dget(ch, "quality", "acceptable"))
+        qc = _CQ_COLORS.get(q, "var(--warn)")
+        proxy = " (wrist proxy)" if _dget(ch, "method") == "wrist_proxy" else ""
+        chips.append(f'<span class="angle" style="border-color:{qc}">ball at contact '
+                     f'<b>{_e(str(_dget(ch, "zone", "")).replace("_", " "))}</b> &middot; '
+                     f'<b style="color:{qc}">{_e(q)}</b>{proxy}</span>')
     for key, (label, unit) in _ANGLE_LABELS.items():
         v = angles.get(key) if isinstance(angles, dict) else None
         if v is not None:
