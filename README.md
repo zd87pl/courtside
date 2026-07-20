@@ -179,6 +179,32 @@ start `courtside-ui` with `OPENROUTER_API_KEY` set). **Be aware this inverts the
 story: frames are uploaded to the API for that run.** Cloud runs are labeled accordingly —
 the report says "frames uploaded" and never claims $0 / 0-bytes.
 
+## Coaching moments (slow-mo + biomechanics + deep dives)
+
+For the top flagged strokes (default 6, `--moments N`, `0` disables) each run now produces
+a **coaching moment**: a slow-motion error clip, and — with the `[pose]` extra installed —
+an on-device biomechanics layer:
+
+- **skeleton overlay + joint angles** at contact (elbow/knee angles, hip–shoulder
+  separation, stance width, contact height), drawn on the keyframe and on an annotated
+  slow-mo video. Angles are **2D image-plane estimates** (labeled as such — consistent
+  with the monocular-video guardrails; never force or weight-transfer claims)
+- **contact-frame refinement**: the stroke timestamp is snapped to the wrist-speed peak
+- **ghost comparison**: the player's own best unflagged same-type stroke from the session,
+  normalized and overlaid as a ghost skeleton ("this vs your best forehand")
+- **a deep-dive coaching card** from a second, focused VLM pass that reads the measured
+  angles as structured JSON (the production AceLens pattern): what happened, why it
+  matters, the one correction, a measurable target, and a drill
+
+```bash
+pip install -e '.[pose]'      # ultralytics + torch (MPS on Apple Silicon)
+courtside match.mp4           # moments are built automatically after clip analysis
+```
+
+Everything degrades gracefully: no `[pose]` extra → slow-mo + cards without overlays; no
+VLM card → assets without prose; a failed moment never kills the run. First pose use
+downloads a ~6 MB YOLO pose model (pre-fetch it before an `--offline` demo).
+
 ### courtside-doctor
 
 If local generation misbehaves (e.g. `<empty output>`), run:

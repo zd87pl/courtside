@@ -222,6 +222,35 @@ input::placeholder{color:var(--muted)}
 
 /* flagged moments */
 .mgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(238px,1fr));gap:13px}
+
+/* deep-dive coaching cards */
+.dcard{background:var(--surface);border:1px solid var(--border);border-radius:15px;
+  overflow:hidden;margin-bottom:18px;box-shadow:var(--shadow)}
+.dcard .media{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+  gap:1px;background:var(--border-2)}
+.dcard .media>div{background:#000;position:relative}
+.dcard .media video,.dcard .media img{width:100%;display:block;aspect-ratio:16/9;object-fit:contain;background:#000}
+.dcard .medialbl{position:absolute;top:8px;left:8px;font-size:10.5px;font-weight:650;
+  letter-spacing:.04em;text-transform:uppercase;color:#fff;background:rgba(0,0,0,.55);
+  padding:2px 8px;border-radius:6px}
+.dcard .body{padding:16px 18px}
+.dcard .hd{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:9px}
+.dcard .hd .code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:650;font-size:14px}
+.dcard .hd .mm{color:var(--muted);font-size:12px}
+.anglerow{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 12px}
+.angle{border:1px solid var(--border);background:var(--surface-2);border-radius:8px;
+  padding:4px 10px;font-size:12px;color:var(--ink-2)}
+.angle b{color:var(--ink);font-weight:650}
+.cgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin-top:4px}
+.cbox .k{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+  font-weight:650;margin-bottom:4px}
+.cbox p{margin:0;font-size:13px;color:var(--ink-2);line-height:1.5}
+.target{border-left:3px solid var(--good);background:color-mix(in srgb,var(--good) 7%,var(--surface));
+  border-radius:8px;padding:9px 13px;margin-top:13px;font-size:13px}
+.target b{color:var(--good-ink)}
+.drill{border:1px dashed var(--border);border-radius:10px;padding:11px 14px;margin-top:11px;font-size:13px}
+.drill .nm{font-weight:650}
+.drill .m{color:var(--muted);font-size:12px}
 .mcard{background:var(--surface);border:1px solid var(--border);border-radius:13px;overflow:hidden;box-shadow:var(--shadow)}
 .mcard img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:#000}
 .mcard .b{padding:11px 13px}
@@ -636,19 +665,35 @@ def render_session(ref) -> str:
             return None
         return f"/frames/{sid}/{rel.as_posix()}"
 
-    moments = collect_flag_moments(sdir, doc, img_fn=img_url)
-    if moments:
-        parts.append('<div class="kicker">Flagged moments<span class="rule"></span></div>')
-        cards = []
-        for m in moments:
-            img = (f'<img loading="lazy" src="{_e(m["img"])}" alt="flagged frame">' if m["img"]
-                   else '<div style="aspect-ratio:16/9;background:#000"></div>')
-            cards.append(f"""
+    # experimental court map: where the errors happened
+    cm_path = sdir / "courtmap.json"
+    if cm_path.exists():
+        try:
+            cm = json.loads(cm_path.read_text())
+            if isinstance(cm, dict) and cm.get("positions"):
+                parts.append(_court_panel(cm))
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    deep = [m for m in (_dget(doc, "moments") or []) if isinstance(m, dict)]
+    if deep:
+        parts.append('<div class="kicker">Coaching moments<span class="rule"></span></div>')
+        for m in deep:
+            parts.append(_moment_card(sid, m))
+    else:
+        moments = collect_flag_moments(sdir, doc, img_fn=img_url)
+        if moments:
+            parts.append('<div class="kicker">Flagged moments<span class="rule"></span></div>')
+            cards = []
+            for m in moments:
+                img = (f'<img loading="lazy" src="{_e(m["img"])}" alt="flagged frame">' if m["img"]
+                       else '<div style="aspect-ratio:16/9;background:#000"></div>')
+                cards.append(f"""
 <div class="mcard">{img}<div class="b">{_sev_chip(m["severity"])}
   <span class="code">{_e(m["code"])}</span>
   <div class="mm">{_e(m["kind"])} &middot; {_e(m["stroke"])} ({_e(m["player"])}) &middot; t={_num(m["t_s"]):.1f}s</div>
   <div class="ev">{_e(m["evidence"])}</div></div></div>""")
-        parts.append(f'<div class="mgrid">{"".join(cards)}</div>')
+            parts.append(f'<div class="mgrid">{"".join(cards)}</div>')
 
     parts.append('<div class="kicker">Rallies<span class="rule"></span></div>')
     for c in _dget(doc, "clips") or []:
@@ -681,6 +726,114 @@ def render_session(ref) -> str:
         parts.append(f'<div class="card rep">{_md_to_html(md.read_text())}</div>')
 
     return _page(ref.title, "".join(parts), crumb="session")
+
+
+def _court_panel(cm: dict) -> str:
+    """SVG court diagram with error-position dots (experimental heatmap)."""
+    W, L = _num(cm.get("court_w_m")) or 10.97, _num(cm.get("court_l_m")) or 23.77
+    # render portrait: x across (width), y down (length); 12px/m with margin
+    S, M = 12, 30
+    vw, vh = int(W * S + 2 * M), int(L * S + 2 * M)
+
+    def X(x): return M + x * S
+    def Y(y): return M + y * S
+
+    sngl = (W - 8.23) / 2  # singles sideline inset
+    svl = 5.485            # service line distance from net
+    net_y = L / 2
+    s = [f'<svg viewBox="0 0 {vw} {vh}" width="240" style="max-width:100%" role="img" aria-label="court map">']
+    s.append(f'<rect x="{X(0)}" y="{Y(0)}" width="{W*S}" height="{L*S}" fill="var(--accent-wash)" '
+             f'stroke="var(--ink-2)" stroke-width="1.5" rx="2"/>')
+    for x0, x1, y0, y1 in ((sngl, sngl, 0, L), (W - sngl, W - sngl, 0, L),
+                           (sngl, W - sngl, net_y - svl, net_y - svl),
+                           (sngl, W - sngl, net_y + svl, net_y + svl),
+                           (W / 2, W / 2, net_y - svl, net_y + svl)):
+        s.append(f'<line x1="{X(x0)}" y1="{Y(y0)}" x2="{X(x1)}" y2="{Y(y1)}" '
+                 f'stroke="var(--ink-2)" stroke-width="1" opacity="0.6"/>')
+    s.append(f'<line x1="{X(0)-6}" y1="{Y(net_y)}" x2="{X(W)+6}" y2="{Y(net_y)}" '
+             f'stroke="var(--ink)" stroke-width="2.5"/>')
+    for p in cm.get("positions", []):
+        if not isinstance(p, dict):
+            continue
+        color = SEV.get(str(p.get("severity", "low")), SEV["low"])[0]
+        tip = f"<span class='h'>{_e(p.get('code', ''))}</span> ({_e(p.get('player', ''))}) &middot; t={_num(p.get('t_s')):.1f}s"
+        s.append(f'<circle cx="{X(_num(p.get("x_m")))}" cy="{Y(_num(p.get("y_m")))}" r="7" '
+                 f'fill="{color}" stroke="var(--surface)" stroke-width="2" data-tip="{_e(tip)}"/>')
+    s.append("</svg>")
+    return (f'<div class="card"><h2>Where the errors happened</h2>'
+            f'<p class="hint">Experimental: fixed-camera court mapping of flagged-moment positions. Hover a dot.</p>'
+            f'<div style="display:flex;justify-content:center">{"".join(s)}</div></div>')
+
+
+_ANGLE_LABELS = {
+    "elbow_right_deg": ("R elbow", "&deg;"), "elbow_left_deg": ("L elbow", "&deg;"),
+    "knee_right_deg": ("R knee", "&deg;"), "knee_left_deg": ("L knee", "&deg;"),
+    "hip_shoulder_separation_deg": ("hip-shoulder", "&deg;"),
+    "stance_width_ratio": ("stance width", "&times; shoulders"),
+    "contact_height_ratio": ("contact height", " (0=hip 1=shoulder)"),
+}
+
+
+def _moment_card(sid: str, m: dict) -> str:
+    """One deep-dive coaching moment: media strip + biomechanics + VLM card."""
+    assets = _dget(m, "assets") or {}
+    poster = (f'/frames/{_e(sid)}/{_e(_dget(assets, "overlay"))}'
+              if _dget(assets, "overlay") else "")
+    poster_attr = f' poster="{poster}"' if poster else ""
+    media = []
+    for key, label, kind in (("overlay_video", "Biomechanics", "video"),
+                             ("ghost_video", "vs your best", "video"),
+                             ("slowmo", "Slow motion", "video"),
+                             ("overlay", "Contact frame", "img")):
+        rel = _dget(assets, key)
+        if not rel:
+            continue
+        url = f"/frames/{_e(sid)}/{_e(rel)}"
+        if kind == "video":
+            pa = poster_attr if key != "slowmo" else ""
+            media.append(f'<div><span class="medialbl">{label}</span>'
+                         f'<video src="{url}"{pa} autoplay loop muted playsinline></video></div>')
+        else:
+            media.append(f'<div><span class="medialbl">{label}</span>'
+                         f'<img loading="lazy" src="{url}" alt="{label}"></div>')
+        if len(media) >= 3:
+            break
+    media_html = f'<div class="media">{"".join(media)}</div>' if media else ""
+
+    angles = _dget(m, "angles") or {}
+    chips = []
+    for key, (label, unit) in _ANGLE_LABELS.items():
+        v = angles.get(key) if isinstance(angles, dict) else None
+        if v is not None:
+            chips.append(f'<span class="angle">{label} <b>{_e(v)}</b>{unit}</span>')
+    angle_html = (f'<div class="anglerow">{"".join(chips)}'
+                  f'<span class="angle" style="color:var(--muted)">2D image-plane</span></div>'
+                  if chips else "")
+
+    t = _num(m.get("contact_t_s") or m.get("t_s"))
+    hd = (f'<div class="hd">{_sev_chip(str(m.get("severity", "low")))}'
+          f'<span class="code">{_e(m.get("code", ""))}</span>'
+          f'<span class="mm">{_e(m.get("kind", ""))} &middot; {_e(m.get("stroke", ""))} '
+          f'({_e(m.get("player", ""))}) &middot; t={t:.1f}s</span></div>')
+
+    card = _dget(m, "card") or {}
+    body = ""
+    if card:
+        drill = _dget(card, "drill") or {}
+        body = f"""
+<div class="cgrid">
+  <div class="cbox"><div class="k">What happened</div><p>{_e(_dget(card, "what_happened", ""))}</p></div>
+  <div class="cbox"><div class="k">Why it matters</div><p>{_e(_dget(card, "why_it_matters", ""))}</p></div>
+  <div class="cbox"><div class="k">The correction</div><p>{_e(_dget(card, "correction", ""))}</p></div>
+</div>
+<div class="target"><b>Target:</b> {_e(_dget(card, "target", ""))}</div>
+<div class="drill"><span class="nm">Drill: {_e(_dget(drill, "name", ""))}</span>
+  <span class="m">&middot; {_e(_dget(drill, "setup", ""))}</span>
+  <div class="m" style="margin-top:3px">Success: {_e(_dget(drill, "success_criterion", ""))}</div></div>"""
+    else:
+        body = f'<p style="margin:0;color:var(--ink-2);font-size:13px">{_e(m.get("evidence", ""))}</p>'
+
+    return f'<div class="dcard">{media_html}<div class="body">{hd}{angle_html}{body}</div></div>'
 
 
 # ---------------- run / progress page ----------------

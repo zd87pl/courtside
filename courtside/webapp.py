@@ -440,14 +440,19 @@ def make_handler(state: AppState):
                 return self._notfound()
             self._html(render_session(ref))
 
+        _MEDIA_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                        ".png": "image/png", ".mp4": "video/mp4"}
+
         def _frame(self, sid: str, rel: str) -> None:
             ref = state.sessions().get(sid)
             if not ref:
                 return self._notfound()
             target = safe_child(ref.dir, rel)
-            if target is None or not target.is_file() or target.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+            if target is None or not target.is_file():
                 return self._notfound()
-            ctype = "image/png" if target.suffix.lower() == ".png" else "image/jpeg"
+            ctype = self._MEDIA_TYPES.get(target.suffix.lower())
+            if ctype is None:
+                return self._notfound()
             self._send(target.read_bytes(), ctype, extra={"Cache-Control": "max-age=3600"})
 
         def _export(self, sid: str) -> None:

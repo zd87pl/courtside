@@ -20,6 +20,8 @@ dependencies = [
 local = ["mlx-vlm>=0.6.0,<0.7"]
 server = ["openai>=1.40"]
 youtube = ["yt-dlp>=2024.10.0"]
+# biomechanics overlays: YOLO pose (torch; uses MPS on Apple Silicon, CPU elsewhere)
+pose = ["ultralytics>=8.3"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
