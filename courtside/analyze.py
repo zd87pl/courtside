@@ -432,6 +432,16 @@ def main(argv: list[str] | None = None) -> int:
         # 4) reports - always reached, built from whatever succeeded
         if not analyses:
             _log("no clips analyzed successfully - no report generated")
+            if backend == "local":
+                _log(
+                    "  hint: if the model returned <empty output>, the "
+                    f"{args.max_frames}-frame prefill at {args.max_side}px likely hit this "
+                    "Mac's GPU memory limit. Try a lighter config:\n"
+                    "    courtside <video> --model qwen3-vl-8b --max-frames 12 --max-side 672\n"
+                    "  or raise the wired limit (see README): "
+                    "sudo sysctl iogpu.wired_limit_mb=<~90% of RAM in MB>\n"
+                    "  raw model output for each clip was saved to clip_NNN.raw.txt for inspection."
+                )
             return 1
 
         facts = report.compute_session_facts(analyses)

@@ -87,6 +87,16 @@ class LocalVLM:
             # was passed through as a float).
             kwargs["kv_bits"] = int(self.kv_bits)
 
+        # mlx-vlm's high-level generate() resets the tokenizer's stopping
+        # criteria to the model's EOS ids before decoding; stream_generate does
+        # not do this itself, so mirror it or the first token can stop decoding
+        # (empty output).
+        tok = getattr(self.processor, "tokenizer", self.processor)
+        try:
+            tok.stopping_criteria.reset(self.model.config.eos_token_id)
+        except Exception:
+            pass
+
         _reset_peak_memory()
         chunks: list[str] = []
         last = None
