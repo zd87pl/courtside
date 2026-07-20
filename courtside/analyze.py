@@ -67,8 +67,14 @@ def _clamp_timestamps(analysis: ClipAnalysis, seg: Segment) -> int:
     return fixed
 
 
+def _snippet(text: str) -> str:
+    """A short, readable preview of raw model output for failure logs."""
+    s = (text or "").strip()
+    return repr(s[:280] + (" ..." if len(s) > 280 else "")) if s else "<empty output>"
+
+
 def analyze_clip(vlm, clip_frames: ClipFrames, schema: dict, max_tokens: int,
-                 stream: bool = False) -> tuple[ClipAnalysis, dict]:
+                 stream: bool = False, raw_path: Path | None = None) -> tuple[ClipAnalysis, dict]:
     seg = clip_frames.segment
     prompt = SYSTEM + "\n\n" + build_clip_prompt(
         n_frames=len(clip_frames.frames),
@@ -88,10 +94,16 @@ def analyze_clip(vlm, clip_frames: ClipFrames, schema: dict, max_tokens: int,
     try:
         parsed = ClipAnalysis.model_validate(extract_json(text))
     except (ValueError, ValidationError) as e:
+        # surface what the model actually produced - saved to disk and logged so
+        # a parse failure is diagnosable instead of opaque
+        if raw_path is not None:
+            try:
+                raw_path.write_text(text or "")
+            except OSError:
+                pass
+        _log(f"    ! invalid JSON ({type(e).__name__}); model said: {_snippet(text)}")
         # one repair round: keep the frames AND the schema in view so the model
-        # can actually correct against them (finding: repair ran without images
-        # or schema).
-        _log(f"    ! invalid JSON ({type(e).__name__}), retrying once")
+        # can actually correct against them.
         repair = (
             "Your previous output was invalid JSON for the required schema.\n"
             f"Error: {e}\n\nRequired JSON schema:\n{json.dumps(schema)}\n\n"
@@ -100,8 +112,19 @@ def analyze_clip(vlm, clip_frames: ClipFrames, schema: dict, max_tokens: int,
         )
         text2, stats2 = vlm.generate(repair, images=clip_frames.frames, max_tokens=max_tokens,
                                      temperature=0.0, json_schema=schema)
-        parsed = ClipAnalysis.model_validate(extract_json(text2))
         stats.wall_s += stats2.wall_s
+        try:
+            parsed = ClipAnalysis.model_validate(extract_json(text2))
+        except (ValueError, ValidationError) as e2:
+            if raw_path is not None:
+                try:
+                    raw_path.with_suffix(".repair.txt").write_text(text2 or "")
+                except OSError:
+                    pass
+            raise ValueError(
+                f"model did not return valid JSON after one repair "
+                f"({type(e2).__name__}). repair output: {_snippet(text2)}"
+            ) from e2
     # trust the pipeline's clip boundaries over the model's
     parsed.start_s, parsed.end_s = seg.start_s, seg.end_s
     n_fixed = _clamp_timestamps(parsed, seg)
@@ -382,7 +405,8 @@ def main(argv: list[str] | None = None) -> int:
                     pass  # fall through to re-analyze
             _log(f"[{i+1}/{len(clips)}] analyzing clip {cf.segment.start_s:.1f}-{cf.segment.end_s:.1f}s ...")
             try:
-                analysis, stats = analyze_clip(vlm, cf, schema, args.max_tokens, stream=args.stream)
+                analysis, stats = analyze_clip(vlm, cf, schema, args.max_tokens, stream=args.stream,
+                                               raw_path=out_dir / f"clip_{i:03d}.raw.txt")
             except KeyboardInterrupt:
                 interrupted = True
                 _log("\n  interrupted - finishing with the clips completed so far")
