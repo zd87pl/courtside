@@ -83,6 +83,31 @@ class ClipAnalysis(BaseModel):
     notes: str = Field(default="", max_length=300)
 
 
+class Drill(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(max_length=80)
+    setup: str = Field(max_length=300)
+    success_criterion: str = Field(max_length=200)
+
+
+class CoachingCard(BaseModel):
+    """Deep-dive analysis of one flagged moment - the 'show them what to fix' unit."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    what_happened: str = Field(max_length=450, description="What the player did on this stroke, concretely")
+    why_it_matters: str = Field(max_length=350, description="The cost in points/consistency")
+    correction: str = Field(max_length=450, description="The specific change to make next time")
+    target: str = Field(max_length=200, description="A measurable cue, e.g. an angle range or timing cue")
+    drill: Drill
+    confidence: Confidence
+
+
+def coaching_card_schema() -> dict:
+    return CoachingCard.model_json_schema()
+
+
 def clip_json_schema() -> dict:
     """Plain JSON schema (used verbatim inside the clip prompt)."""
     return ClipAnalysis.model_json_schema()

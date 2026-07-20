@@ -94,6 +94,63 @@ def extract_clip_frames(
     return ClipFrames(segment=segment, fps_used=fps_used, frames=frames)
 
 
+def extract_window_frames(
+    video: Path,
+    t_s: float,
+    out_dir: Path,
+    pre: float = 1.5,
+    post: float = 1.5,
+    fps: float = 12.0,
+    max_side: int = 720,
+) -> tuple[list[Path], float, float]:
+    """High-fps frames around a flagged moment (for pose + overlay video).
+
+    Returns (frames, start_s, fps) - denser and larger than clip sampling so
+    skeleton overlays and slow-motion read well.
+    """
+    start = max(0.0, t_s - pre)
+    seg = Segment(start, t_s + post)
+    cf = extract_clip_frames(video, seg, out_dir, fps=fps,
+                             max_frames=int((pre + post) * fps) + 2, max_side=max_side)
+    return cf.frames, start, cf.fps_used
+
+
+def slowmo_snippet(
+    video: Path,
+    t_s: float,
+    out_path: Path,
+    pre: float = 1.5,
+    post: float = 1.5,
+    slow: float = 2.5,
+    max_side: int = 640,
+    smooth: bool = False,
+) -> Path | None:
+    """Slow-motion loop of a flagged moment.
+
+    ``smooth=True`` adds motion-interpolated frames (ffmpeg minterpolate) for
+    buttery slow-mo at the cost of CPU time; plain setpts otherwise.
+    Best-effort: returns None on failure rather than aborting the run.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    start = max(0.0, t_s - pre)
+    vf = f"scale='min({max_side},iw)':-2:flags=lanczos,setpts={slow:.2f}*PTS"
+    if smooth:
+        vf += ",minterpolate=fps=30:mi_mode=mci:mc_mode=aobmc"
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-ss", f"{start:.3f}", "-t", f"{pre + post:.3f}",
+        "-i", str(video),
+        "-an", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+        "-vf", vf, "-movflags", "+faststart",
+        str(out_path),
+    ]
+    try:
+        subprocess.run(cmd, check=True, timeout=180)
+        return out_path if out_path.exists() else None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None
+
+
 def extract_flag_snippet(
     video: Path,
     t_s: float,

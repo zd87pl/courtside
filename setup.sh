@@ -117,6 +117,9 @@ python -m pip install --quiet --upgrade pip
 
 EXTRAS="dev,server,youtube"
 if [ "$APPLE_SILICON" = 1 ]; then EXTRAS="local,dev,server,youtube"; fi
+if ask "Install biomechanics extra (pose overlays + joint angles; ~2 GB torch download)?" "Y"; then
+  EXTRAS="$EXTRAS,pose"
+fi
 step "Installing courtside  ${DIM}(extras: ${EXTRAS})${RST}"
 if pip install --quiet -e ".[${EXTRAS}]"; then
   ok "installed"

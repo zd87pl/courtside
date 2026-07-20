@@ -33,6 +33,19 @@ def _img_data_uri(path: Path) -> str | None:
         return None
 
 
+_VIDEO_EMBED_CAP = 2_500_000  # bytes per clip: keep the export shareable
+
+
+def _video_data_uri(path: Path) -> str | None:
+    try:
+        if path.stat().st_size > _VIDEO_EMBED_CAP:
+            return None
+        b64 = base64.b64encode(path.read_bytes()).decode()
+        return f"data:video/mp4;base64,{b64}"
+    except OSError:
+        return None
+
+
 def _clip_frames(out_dir: Path, clip: dict[str, Any]) -> list[Path]:
     frame_dir = out_dir / clip.get("frame_dir", f"clip_{clip.get('index', 0):03d}")
     return sorted(frame_dir.glob("frame_*.jpg"))
@@ -251,6 +264,68 @@ code{background:var(--panel);border:1px solid var(--border);border-radius:4px;pa
 """
 
 
+_ANGLE_LABELS = {
+    "elbow_right_deg": "R elbow", "elbow_left_deg": "L elbow",
+    "knee_right_deg": "R knee", "knee_left_deg": "L knee",
+    "hip_shoulder_separation_deg": "hip-shoulder",
+    "stance_width_ratio": "stance width", "contact_height_ratio": "contact height",
+}
+
+
+def _deep_moment_html(out_dir: Path, m: dict[str, Any]) -> str:
+    """Self-contained coaching-moment card: media embedded as data URIs."""
+    assets = m.get("assets") or {}
+    media: list[str] = []
+    for key, label in (("overlay_video", "Biomechanics"), ("ghost_video", "vs your best"),
+                       ("slowmo", "Slow motion")):
+        rel = assets.get(key)
+        if not rel:
+            continue
+        uri = _video_data_uri(out_dir / rel)
+        if uri:
+            media.append(f'<div style="position:relative"><video src="{uri}" autoplay loop muted '
+                         f'playsinline style="width:100%;display:block;background:#000"></video>'
+                         f'<span style="position:absolute;top:6px;left:6px;background:rgba(0,0,0,.55);'
+                         f'color:#fff;font-size:10px;padding:2px 7px;border-radius:5px">{label}</span></div>')
+        if len(media) >= 2:
+            break
+    if not media and assets.get("overlay"):
+        uri = _img_data_uri(out_dir / assets["overlay"])
+        if uri:
+            media.append(f'<img src="{uri}" style="width:100%;display:block" alt="contact frame">')
+    media_html = ("<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));"
+                  f"gap:2px'>{''.join(media)}</div>") if media else ""
+
+    angles = m.get("angles") or {}
+    chips = " ".join(
+        f'<code>{lbl}: {angles[k]}</code>'
+        for k, lbl in _ANGLE_LABELS.items() if isinstance(angles, dict) and angles.get(k) is not None)
+    color = _SEV_COLOR.get(m.get("severity", "low"), "#8a8f98")
+    card = m.get("card") or {}
+    drill = card.get("drill") or {}
+    body = ""
+    if card:
+        body = (f"<p><b>What happened:</b> {html.escape(card.get('what_happened', ''))}</p>"
+                f"<p><b>Why it matters:</b> {html.escape(card.get('why_it_matters', ''))}</p>"
+                f"<p><b>The correction:</b> {html.escape(card.get('correction', ''))}</p>"
+                f"<p><b>Target:</b> {html.escape(card.get('target', ''))}</p>"
+                f"<p><b>Drill - {html.escape(drill.get('name', ''))}:</b> "
+                f"{html.escape(drill.get('setup', ''))} "
+                f"<i>Success: {html.escape(drill.get('success_criterion', ''))}</i></p>")
+    else:
+        body = f"<p>{html.escape(str(m.get('evidence', '')))}</p>"
+    t = m.get("contact_t_s") or m.get("t_s") or 0
+    return (f'<div class="panel">{media_html}'
+            f'<div style="margin-top:10px"><span class="chip" style="background:{color}">'
+            f'{html.escape(str(m.get("severity", "")))}</span> '
+            f'<span class="mcode">{html.escape(str(m.get("code", "")))}</span> '
+            f'<span class="muted">{html.escape(str(m.get("stroke", "")))} '
+            f'({html.escape(str(m.get("player", "")))}) @ t={t:.1f}s</span></div>'
+            + (f'<div class="muted" style="font-size:12px;margin:6px 0">{chips} '
+               f'<i>2D image-plane</i></div>' if chips else "")
+            + body + "</div>")
+
+
 def render_html(out_dir: Path, session: dict[str, Any]) -> str:
     activity = None
     apath = out_dir / "activity.json"
@@ -303,8 +378,15 @@ def render_html(out_dir: Path, session: dict[str, Any]) -> str:
     parts.append(_timeline_svg(session, activity))
     parts.append("</div>")
 
-    # flagged moments
-    moments = _collect_flag_moments(out_dir, session)
+    # deep-dive coaching moments (slow-mo + biomechanics + cards), when present
+    deep = [m for m in (session.get("moments") or []) if isinstance(m, dict)]
+    if deep:
+        parts.append("<h2>Coaching moments</h2>")
+        for m in deep:
+            parts.append(_deep_moment_html(out_dir, m))
+
+    # flagged moments (fallback gallery when no deep dives exist)
+    moments = [] if deep else _collect_flag_moments(out_dir, session)
     if moments:
         parts.append('<h2>Flagged moments</h2><div class="mgrid">')
         for m in moments:

@@ -249,6 +249,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--offline", action="store_true",
                    help="forbid any network access (weights must be pre-cached)")
     p.add_argument("--stream", action="store_true", help="echo model tokens live during analysis")
+    p.add_argument("--moments", type=int, default=6, metavar="N",
+                   help="deep-dive the top N flagged strokes with slow-mo + biomechanics "
+                        "+ coaching cards (0 disables; default 6)")
+    p.add_argument("--no-pose", action="store_true",
+                   help="skip pose/biomechanics even if the [pose] extra is installed")
+    p.add_argument("--smooth-slowmo", action="store_true",
+                   help="motion-interpolated slow-mo (nicer, much slower to render)")
+    p.add_argument("--heatmap", action="store_true",
+                   help="EXPERIMENTAL: map flagged-moment positions onto a court diagram "
+                        "(fixed camera + [pose] extra required)")
     p.add_argument("--server-url", default=None, help="OpenAI-compatible base URL instead of local load "
                    "(e.g. https://openrouter.ai/api/v1)")
     p.add_argument("--server-model", default=None, help="model name for --server-url")
@@ -453,6 +463,18 @@ def main(argv: list[str] | None = None) -> int:
         fps_used_values = [c["fps_used"] for c in clip_records if c.get("fps_used")]
         res_s = report.frame_resolution_s(fps_used_values)
 
+        # 4a) deep-dive moments: slow-mo + biomechanics + coaching cards
+        moments: list[dict] = []
+        if args.moments > 0 and not interrupted:
+            from .moments import build_moments
+            _log("building flagged-moment deep dives ...")
+            try:
+                moments = build_moments(video, analyses, out_dir, vlm=vlm,
+                                        cap=args.moments, use_pose=not args.no_pose,
+                                        smooth_slowmo=args.smooth_slowmo, log=_log)
+            except Exception as e:  # noqa: BLE001 - deep dives must never kill the report
+                _log(f"  moments failed ({type(e).__name__}: {e}) - continuing without")
+
         t_report = time.perf_counter()
         markdown = _generate_markdown(vlm, analyses, facts, res_s)
         report_s = time.perf_counter() - t_report
@@ -476,6 +498,22 @@ def main(argv: list[str] | None = None) -> int:
             created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             run_stats=run_stats, facts=facts, clips=clip_records,
         )
+        if moments:
+            session_doc["moments"] = moments
+            if args.heatmap:
+                try:
+                    from .court import build_courtmap
+                    anchored = [m for m in moments if m.get("contact_frame") and m.get("contact_px")]
+                    if anchored:
+                        cm = build_courtmap(
+                            out_dir / anchored[0]["contact_frame"],
+                            [{"t_s": m["t_s"], "player": m["player"], "code": m["code"],
+                              "severity": m["severity"], "xy": m["contact_px"]} for m in anchored],
+                            out_dir / "courtmap.json")
+                        _log("  court map: " + (f"{len(cm['positions'])} positions mapped"
+                                                if cm else "court not detected - skipped"))
+                except Exception as e:  # noqa: BLE001 - experimental, never fatal
+                    _log(f"  court map failed ({type(e).__name__}) - skipped")
         _finalize_reports(out_dir, session_doc, markdown)
         _log("\n" + report.cost_summary_line(run_stats))
     finally:
