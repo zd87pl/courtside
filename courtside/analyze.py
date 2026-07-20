@@ -463,17 +463,22 @@ def main(argv: list[str] | None = None) -> int:
         fps_used_values = [c["fps_used"] for c in clip_records if c.get("fps_used")]
         res_s = report.frame_resolution_s(fps_used_values)
 
-        # 4a) deep-dive moments: slow-mo + biomechanics + coaching cards
+        # 4a) deep-dive moments + contact-quality sweep
         moments: list[dict] = []
+        contact_quality: dict = {}
         if args.moments > 0 and not interrupted:
             from .moments import build_moments
             _log("building flagged-moment deep dives ...")
             try:
-                moments = build_moments(video, analyses, out_dir, vlm=vlm,
-                                        cap=args.moments, use_pose=not args.no_pose,
-                                        smooth_slowmo=args.smooth_slowmo, log=_log)
+                moments, contact_quality = build_moments(
+                    video, analyses, out_dir, vlm=vlm,
+                    cap=args.moments, use_pose=not args.no_pose,
+                    smooth_slowmo=args.smooth_slowmo, log=_log)
             except Exception as e:  # noqa: BLE001 - deep dives must never kill the report
                 _log(f"  moments failed ({type(e).__name__}: {e}) - continuing without")
+        if contact_quality.get("summary"):
+            # the report prompt sees the measured strike-zone stats as facts
+            facts["contact_quality"] = contact_quality["summary"]
 
         t_report = time.perf_counter()
         markdown = _generate_markdown(vlm, analyses, facts, res_s)
@@ -500,6 +505,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         if moments:
             session_doc["moments"] = moments
+        if contact_quality:
+            session_doc["contact_quality"] = contact_quality
             if args.heatmap:
                 try:
                     from .court import build_courtmap

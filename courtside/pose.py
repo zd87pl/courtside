@@ -280,12 +280,54 @@ def _badge(img: np.ndarray, text: str, org: tuple[int, int]) -> None:
     cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
 
 
+_IDEAL = (90, 200, 90)      # BGR green for the ideal strike band
+_BALL = (60, 220, 255)      # warm yellow ball marker
+_POOR = (80, 80, 230)
+
+
+def _draw_contact(img: np.ndarray, pose: FramePose, contact: dict[str, Any],
+                  ideal_span: tuple[float, float] | None) -> None:
+    """Strike-zone guides + ball marker: mark good vs bad contact height."""
+    x1, _, x2, _ = pose.bbox
+    pad = 0.35 * (x2 - x1)
+    gx1, gx2 = int(x1 - pad), int(x2 + pad)
+    lines = contact.get("lines_px") or {}
+    if ideal_span is not None:
+        top, bot = int(min(ideal_span)), int(max(ideal_span))
+        band = img.copy()
+        cv2.rectangle(band, (gx1, top), (gx2, bot), _IDEAL, -1)
+        cv2.addWeighted(band, 0.22, img, 0.78, 0, img)
+        cv2.rectangle(img, (gx1, top), (gx2, bot), _IDEAL, 1, cv2.LINE_AA)
+    for name in ("knee", "hip", "shoulder"):
+        y = lines.get(name)
+        if y is None:
+            continue
+        cv2.line(img, (gx1, int(y)), (gx2, int(y)), (200, 200, 200), 1, cv2.LINE_AA)
+        cv2.putText(img, name, (gx2 + 4, int(y) + 4), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.42, (230, 230, 230), 1, cv2.LINE_AA)
+    bp = contact.get("ball_px")
+    if bp:
+        bx, by = int(bp[0]), int(bp[1])
+        color = _IDEAL if contact.get("quality") == "ideal" else (
+            _BALL if contact.get("quality") == "acceptable" else _POOR)
+        cv2.circle(img, (bx, by), 9, color, 2, cv2.LINE_AA)
+        cv2.circle(img, (bx, by), 2, color, -1, cv2.LINE_AA)
+        label = f"{contact.get('zone', '?').replace('_', ' ')} ({contact.get('quality', '?')})"
+        if contact.get("method") == "wrist_proxy":
+            label += " ~wrist"
+        _badge(img, label, (min(bx + 14, img.shape[1] - 180), max(by, 18)))
+
+
 def draw_overlay(frame_path: Path, pose: FramePose, angles: dict[str, Any],
-                 out_path: Path, ghost_kpts: np.ndarray | None = None) -> Path:
-    """Skeleton + angle badges (+ optional normalized ghost skeleton)."""
+                 out_path: Path, ghost_kpts: np.ndarray | None = None,
+                 contact: dict[str, Any] | None = None,
+                 ideal_span: tuple[float, float] | None = None) -> Path:
+    """Skeleton + angle badges (+ ghost, + strike-zone guides and ball marker)."""
     img = cv2.imread(str(frame_path))
     if img is None:
         raise RuntimeError(f"could not read frame {frame_path}")
+    if contact:
+        _draw_contact(img, pose, contact, ideal_span)
     if ghost_kpts is not None:
         _draw_skeleton(img, ghost_kpts, _GHOST, thickness=2, alpha=0.55)
     _draw_skeleton(img, pose.kpts, _BONE)

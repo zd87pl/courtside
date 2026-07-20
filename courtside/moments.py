@@ -104,14 +104,18 @@ def find_reference_stroke(analyses: list[ClipAnalysis], stroke_type: str,
 
 
 def _deepdive_card(vlm, moment: dict[str, Any], frames: list[Path], window_s: float,
-                   angles: dict[str, Any] | None, max_tokens: int = 900) -> dict[str, Any] | None:
+                   angles: dict[str, Any] | None, contact: dict[str, Any] | None = None,
+                   max_tokens: int = 900) -> dict[str, Any] | None:
     """One focused VLM pass -> validated CoachingCard dict (None on failure)."""
     schema = coaching_card_schema()
+    measured: dict[str, Any] = {}
     if angles:
-        usable = {k: v for k, v in angles.items() if v is not None}
-        angles_block = ANGLES_BLOCK.format(angles_json=json.dumps(usable)) if usable else ""
-    else:
-        angles_block = ""
+        measured.update({k: v for k, v in angles.items() if v is not None})
+    if contact:
+        measured["ball_contact"] = {k: contact[k] for k in
+                                    ("zone", "quality", "method", "height_ratio")
+                                    if k in contact}
+    angles_block = ANGLES_BLOCK.format(angles_json=json.dumps(measured)) if measured else ""
     prompt = DEEPDIVE_TEMPLATE.format(
         n_frames=len(frames), window_s=window_s, t_s=moment["t_s"],
         code=moment["code"], severity=moment["severity"], kind=moment["kind"],
@@ -128,6 +132,50 @@ def _deepdive_card(vlm, moment: dict[str, Any], frames: list[Path], window_s: fl
         return None
 
 
+def assess_session_contacts(video: Path, analyses: list[ClipAnalysis], out_dir: Path,
+                            estimator, ball_detector, cap: int = 40,
+                            log=print) -> dict[str, Any]:
+    """Contact-height sweep over EVERY stroke (not just flagged ones).
+
+    One small frame window per stroke -> pose -> ball/wrist assessment. This is
+    the session-level success-factor stat ("N% struck in the ideal zone").
+    Sweep frames are deleted afterwards; only the measurements are kept.
+    """
+    import shutil
+
+    from .ball import assess_contact, summarize_contacts
+
+    strokes = [s for a in analyses for s in a.strokes][:cap]
+    if not strokes or estimator is None:
+        return {}
+    workdir = out_dir / "moments" / "contact_sweep"
+    records: list[dict[str, Any]] = []
+    for j, s in enumerate(strokes):
+        try:
+            frames, start_s, fps = extract_window_frames(
+                video, s.t_s, workdir / f"s{j:03d}", pre=0.2, post=0.2, fps=12.0, max_side=640)
+            if not frames:
+                continue
+            idx = min(len(frames) - 1, max(0, round((s.t_s - start_s) * fps)))
+            win = estimator.track_window(frames, s.player, fps, start_s, idx)
+            pose = win.poses[win.contact_idx]
+            if pose is None:
+                continue
+            c = assess_contact(pose, s.stroke, win.frame_paths, win.contact_idx, ball_detector)
+            if c:
+                records.append({"t_s": s.t_s, "player": s.player, "stroke": s.stroke,
+                                "contact": {k: v for k, v in c.items() if k != "lines_px"}})
+        except Exception:  # noqa: BLE001 - one stroke must not kill the sweep
+            continue
+    shutil.rmtree(workdir, ignore_errors=True)
+    summary = summarize_contacts(records)
+    if not summary:
+        return {}
+    log(f"  contact quality: {summary['strokes_measured']} strokes measured, "
+        f"{summary['pct_ideal']}% in the ideal zone")
+    return {"summary": summary, "strokes": records}
+
+
 def build_moments(
     video: Path,
     analyses: list[ClipAnalysis],
@@ -137,15 +185,17 @@ def build_moments(
     use_pose: bool = True,
     smooth_slowmo: bool = False,
     log=print,
-) -> list[dict[str, Any]]:
-    """Produce deep-dive assets + cards for the session's top flagged strokes."""
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Deep-dive assets + cards for the top flagged strokes, plus the
+    session-wide contact-quality sweep. Returns (moments, contact_quality)."""
     selected = select_flagged_strokes(analyses, cap=cap)
     if not selected:
-        return []
+        selected = []
     mdir = out_dir / "moments"
     mdir.mkdir(parents=True, exist_ok=True)
 
     estimator = None
+    ball_detector = None
     if use_pose:
         from .pose import pose_available
         if pose_available():
@@ -155,6 +205,14 @@ def build_moments(
                 log("  biomechanics: pose model loaded")
             except Exception as e:  # noqa: BLE001
                 log(f"  biomechanics unavailable ({type(e).__name__}: {e}) - continuing without")
+            if estimator is not None:
+                from .ball import BallDetector
+                try:
+                    ball_detector = BallDetector()
+                    log("  ball detection: model loaded")
+                except Exception as e:  # noqa: BLE001
+                    log(f"  ball detection unavailable ({type(e).__name__}) - "
+                        "contact height will use the wrist proxy")
         else:
             log("  biomechanics: [pose] extra not installed - skipping overlays "
                 "(pip install -e '.[pose]')")
@@ -182,6 +240,7 @@ def build_moments(
                 window = estimator.track_window(frames, m["player"], fps, start_s, nominal)
                 rec["contact_t_s"] = round(window.contact_t_s, 2)
                 rec["angles"] = window.angles
+                from .ball import QUALITY_BANDS, assess_contact
                 from .pose import ankle_midpoint, draw_overlay, render_overlay_video
                 contact_pose = window.poses[window.contact_idx]
                 if contact_pose is not None:
@@ -190,8 +249,33 @@ def build_moments(
                         rec["contact_px"] = [round(mid[0], 1), round(mid[1], 1)]
                         rec["contact_frame"] = str(
                             window.frame_paths[window.contact_idx].relative_to(out_dir))
+                    contact = assess_contact(contact_pose, m["stroke"], window.frame_paths,
+                                             window.contact_idx, ball_detector)
+                    ideal_span = None
+                    if contact:
+                        rec["contact_height"] = {k: v for k, v in contact.items()
+                                                 if k != "lines_px"}
+                        lines = contact.get("lines_px") or {}
+                        bands = QUALITY_BANDS.get(m["stroke"], {})
+                        zone_edges = {"below_knee": ("knee", None), "knee_to_hip": ("hip", "knee"),
+                                      "hip_to_chest": ("chest", "hip"),
+                                      "chest_to_shoulder": ("shoulder", "chest"),
+                                      "shoulder_to_head": ("head", "shoulder"),
+                                      "above_head": (None, "head")}
+                        ys = []
+                        for z, q in bands.items():
+                            if q != "ideal":
+                                continue
+                            top, bot = zone_edges.get(z, (None, None))
+                            if top and lines.get(top) is not None:
+                                ys.append(lines[top])
+                            if bot and lines.get(bot) is not None:
+                                ys.append(lines[bot])
+                        if len(ys) >= 2:
+                            ideal_span = (min(ys), max(ys))
                     ov = draw_overlay(window.frame_paths[window.contact_idx], contact_pose,
-                                      window.angles, mdir / f"moment_{i:02d}_overlay.jpg")
+                                      window.angles, mdir / f"moment_{i:02d}_overlay.jpg",
+                                      contact=contact, ideal_span=ideal_span)
                     assets.overlay = f"moments/{ov.name}"
                 ovid = render_overlay_video(window.frame_paths, window.poses,
                                             mdir / f"moment_{i:02d}_overlay.mp4")
@@ -219,7 +303,8 @@ def build_moments(
             frames_for_card = (window.frame_paths[::2][:8] if window is not None
                                else _card_frames(video, m["t_s"], mdir, i))
             if frames_for_card:
-                card = _deepdive_card(vlm, m, frames_for_card, 3.0, rec.get("angles"))
+                card = _deepdive_card(vlm, m, frames_for_card, 3.0, rec.get("angles"),
+                                      contact=rec.get("contact_height"))
                 if card:
                     rec["card"] = card
                 else:
@@ -228,7 +313,12 @@ def build_moments(
         rec["assets"] = {k: v for k, v in vars(assets).items() if v}
         moments.append(rec)
         (mdir / f"moment_{i:02d}.json").write_text(json.dumps(rec, indent=2))
-    return moments
+
+    contact_quality: dict[str, Any] = {}
+    if estimator is not None:
+        contact_quality = assess_session_contacts(video, analyses, out_dir,
+                                                  estimator, ball_detector, log=log)
+    return moments, contact_quality
 
 
 def _card_frames(video: Path, t_s: float, mdir: Path, i: int) -> list[Path]:
