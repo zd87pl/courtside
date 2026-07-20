@@ -7,7 +7,9 @@ import sys
 import time
 
 from courtside.report_html import _md_to_html
-from courtside.webapp import AppState, RunManager, build_analysis_request, safe_child, scan_sessions
+from courtside.webapp import (
+    AppState, Run, RunManager, build_analysis_request, derive_progress, safe_child, scan_sessions,
+)
 from courtside.webui import render_dashboard, render_run_page, render_session
 
 
@@ -97,7 +99,7 @@ def test_views_render(tmp_path):
     ref = next(iter(state.sessions().values()))
     page = render_session(ref)
     assert "Session timeline" in page and "late_preparation" in page
-    assert "processed on-device" in page and "Export report" in page
+    assert "on-device" in page.lower() and "Export report" in page
     # frames referenced by URL (served route), never embedded as data URIs
     assert f"/frames/{ref.sid}/clip_000/frame_0001.jpg" in page
     assert "data:image/jpeg" not in page
@@ -178,6 +180,76 @@ def test_form_field_whitelist():
     assert "server_url" not in ALLOWED_FORM_FIELDS
     assert "download_dir" not in ALLOWED_FORM_FIELDS  # set internally, never from the form
     assert {"video", "model", "quick", "offline", "dry_run"} == ALLOWED_FORM_FIELDS
+
+
+def test_cancel_terminates_running_analysis():
+    rm = RunManager()
+    run = rm.start([sys.executable, "-c", "import time; time.sleep(30)"],
+                   out_dir=__import__("pathlib").Path("/tmp"), video="v.mp4")
+    for _ in range(60):  # wait until the child is actually up
+        if run.proc is not None:
+            break
+        time.sleep(0.02)
+    assert rm.cancel(run.rid) is True
+    for _ in range(100):
+        if run.status != "running":
+            break
+        time.sleep(0.05)
+    assert run.status == "cancelled"
+    assert rm.cancel(run.rid) is False  # already stopped
+    # a new run is startable after a cancel
+    rm.start([sys.executable, "-c", "print(1)"],
+             out_dir=__import__("pathlib").Path("/tmp"), video="w.mp4")
+
+
+def _run_with_log(lines, status="running"):
+    r = Run(rid="x", argv=[], out_dir=__import__("pathlib").Path("/tmp"), video="v")
+    r.log = list(lines)
+    r.status = status
+    return r
+
+
+def test_derive_progress_phases():
+    assert derive_progress(_run_with_log(["starting"]))[0] == "queued"
+    assert derive_progress(_run_with_log(["fetching https://..."]))[0] == "downloading"
+    assert derive_progress(_run_with_log(["segments: 4 active clips"]))[0] == "segmenting"
+    assert derive_progress(_run_with_log(["clip 000  0.0- 10.0s  32 frames"]))[0] == "extracting"
+    phase, pct = derive_progress(_run_with_log(["[2/4] analyzing clip 10.0-20.0s ..."]))
+    assert phase == "analyzing" and 40 <= pct <= 90
+    assert derive_progress(_run_with_log(["generating session report ..."]))[0] == "reporting"
+    assert derive_progress(_run_with_log(["anything"], status="done")) == ("done", 100)
+    assert derive_progress(_run_with_log(["[1/3] analyzing"], status="cancelled"))[0] == "cancelled"
+
+
+def test_sample_excluded_from_dashboard_totals(tmp_path):
+    # a real session plus a session under examples/ (marked sample)
+    _make_session(tmp_path, name="real_courtside", video="real.mp4")
+    ex = tmp_path / "examples" / "demo_session"
+    ex.mkdir(parents=True)
+    (ex / "session.json").write_text(json.dumps({
+        "video": "sample.mp4", "on_device": True,
+        "facts": {"total_strokes": 999, "clips_analyzed": 9,
+                  "player_split": {"near": 5, "far": 4, "unknown": 0},
+                  "top_technique_flags": {}, "top_tactical_flags": {}},
+        "run_stats": {"total_tokens": 1, "realtime_factor": 11.0, "cloud_equiv_usd": 0.87},
+        "clips": [],
+    }))
+    state = AppState([tmp_path])
+    sess = state.sessions(max_age_s=0)
+    assert any(s.is_sample for s in sess.values())
+    dash = render_dashboard(state)
+    # the aggregate "strokes read" tile counts only the real session (2),
+    # not the sample's 999; the sample is still listed and tagged
+    assert '<b class="tnum">2</b><span>strokes read</span>' in dash
+    assert "Sample" in dash
+
+
+def test_run_page_has_progress_and_cancel():
+    class R:
+        rid, video = "abc123", "match.mp4"
+    out = render_run_page(R())
+    assert "progbar" in out and "cancelRun" in out
+    assert "/cancel/" in out and "abc123" in out
 
 
 def test_md_renderer_joins_wrapped_lines():

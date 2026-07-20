@@ -207,13 +207,59 @@ def strip_think(text: str) -> str:
     return text.strip()
 
 
+def _first_json_object(s: str) -> dict | None:
+    """Grab the first balanced {...} object, tolerating braces inside strings."""
+    start = s.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(s)):
+        ch = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(s[start : i + 1])
+                except json.JSONDecodeError:
+                    return None
+    # unbalanced (truncated) - fall back to outermost slice
+    end = s.rfind("}")
+    if end > start:
+        try:
+            return json.loads(s[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
 def extract_json(text: str) -> dict:
-    """Best-effort: strip fences / thinking blocks, grab outermost object."""
-    text = strip_think(text)
-    m = _FENCE_RE.search(text)
-    if m:
-        text = m.group(1)
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("No JSON object found in model output")
-    return json.loads(text[start : end + 1])
+    """Best-effort: strip fences / thinking blocks, grab outermost object.
+
+    Tries the think-stripped text first, then the raw text (in case the model
+    put its answer inside an unclosed <think> block, which stripping would
+    otherwise discard), then any fenced block.
+    """
+    if not text or not text.strip():
+        raise ValueError("model returned empty output")
+    stripped = strip_think(text)
+    for candidate in (stripped, text):
+        m = _FENCE_RE.search(candidate)
+        body = m.group(1) if m else candidate
+        obj = _first_json_object(body)
+        if isinstance(obj, dict):
+            return obj
+    raise ValueError("No JSON object found in model output")

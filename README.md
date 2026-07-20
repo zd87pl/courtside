@@ -35,13 +35,18 @@ inspect without a Mac, a GPU, or a model download.
 courtside-ui        # serves http://127.0.0.1:8799 (localhost only)
 ```
 
-A SaaS-style dashboard over the same pipeline: sessions overview with aggregate stats,
-**analyze from the browser** (pick a workspace video, paste a path **or a YouTube URL**,
-choose a model, watch the log stream live), and a rich per-session view — rally/stroke
-timeline with hover details, flagged-moments keyframe gallery, per-rally cards, and the
-coaching report. Light and dark themes. One analysis runs at a time (one laptop, one
-model). URL downloads fetch over the network via yt-dlp; the analysis itself still runs
-entirely on-device (`--offline` refuses URLs for that reason).
+A SaaS-style dashboard over the same pipeline: an overview hero with the on-device /
+faster-than-realtime / $0-cloud story, **analyze from the browser** (pick a workspace
+video, paste a path **or a YouTube URL**, choose a model), a **live phased progress view**
+(Download → Segment → Extract → Analyze → Report) with a **Cancel** button and a streaming
+log, and a rich per-session view — rally/stroke timeline with hover details, flagged-moments
+keyframe gallery, per-rally cards, and the coaching report. Light and dark themes. One
+analysis runs at a time (one laptop, one model). URL downloads fetch over the network via
+yt-dlp; the analysis itself still runs entirely on-device (`--offline` refuses URLs).
+
+The speed number is **honest end-to-end wall clock** — it includes model load, frame
+extraction, inference, and the report pass, not just inference — so what the report claims
+matches a stopwatch.
 
 It is stdlib-only and binds to `127.0.0.1` — the "backend" is your laptop, nothing is
 uploaded anywhere. `Export report` produces the self-contained `report.html` for sharing.

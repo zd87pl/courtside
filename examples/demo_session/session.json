@@ -16,8 +16,9 @@
   "run_stats": {
     "video_duration_s": 2304.0,
     "segment_s": 18.0,
-    "total_wall_s": 208.0,
-    "realtime_factor": 11.08,
+    "inference_wall_s": 111.0,
+    "total_wall_s": 212.0,
+    "realtime_factor": 10.87,
     "prompt_tokens": 284000,
     "generation_tokens": 6800,
     "total_tokens": 290800,
@@ -26,7 +27,13 @@
     "on_device_usd": 0.0,
     "bytes_uploaded": 0,
     "clips_ok": 3,
-    "clips_failed": 0
+    "clips_failed": 0,
+    "timings": {
+      "segment_s": 18.0,
+      "extract_s": 41.0,
+      "model_load_s": 31.0,
+      "report_s": 11.0
+    }
   },
   "facts": {
     "clips_analyzed": 3,

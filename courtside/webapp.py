@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -38,6 +39,7 @@ class SessionRef:
     sid: str
     dir: Path
     doc: dict
+    is_sample: bool = False
 
     @property
     def title(self) -> str:
@@ -66,7 +68,8 @@ def scan_sessions(roots: list[Path], max_depth: int = 2) -> dict[str, SessionRef
                        "video": d.name, "facts": {}, "run_stats": {}}
             if not isinstance(doc, dict):
                 return  # scalar/null session.json: skip, don't poison every page
-            ref = SessionRef(sid=_sid_for(d), dir=d, doc=doc)
+            is_sample = any(part == "examples" for part in d.parts)
+            ref = SessionRef(sid=_sid_for(d), dir=d, doc=doc, is_sample=is_sample)
             found[ref.sid] = ref
             return  # a run dir doesn't nest more run dirs
         if depth >= max_depth:
@@ -121,9 +124,11 @@ class Run:
     out_dir: Path
     video: str
     started_at: float = field(default_factory=time.time)
-    status: str = "running"  # running | done | failed
+    status: str = "running"  # running | done | failed | cancelled
     returncode: int | None = None
+    cancelled: bool = False
     log: list[str] = field(default_factory=list)
+    proc: subprocess.Popen | None = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def append(self, line: str) -> None:
@@ -135,6 +140,35 @@ class Run:
     def tail(self, n: int = 400) -> list[str]:
         with self._lock:
             return self.log[-n:]
+
+
+_PHASES = ["queued", "downloading", "segmenting", "extracting", "analyzing", "reporting", "done"]
+_ANALYZE_RE = re.compile(r"\[(\d+)/(\d+)\]\s+analyzing")
+
+
+def derive_progress(run: "Run") -> tuple[str, int]:
+    """Infer a coarse phase + percentage from the child's log for the UI bar."""
+    phase, pct = "queued", 4
+    for line in run.tail(800):
+        s = line.strip()
+        if s.startswith("fetching") or s.startswith("[download]") or s.startswith("[youtube]"):
+            phase, pct = "downloading", max(pct, 10)
+        elif s.startswith("segments:") or "auto-segmentation" in s:
+            phase, pct = "segmenting", max(pct, 24)
+        elif re.match(r"clip \d+\s", s):
+            phase, pct = "extracting", max(pct, 34)
+        elif "analyzing clip" in s:
+            m = _ANALYZE_RE.search(s)
+            if m:
+                i, n = int(m.group(1)), max(int(m.group(2)), 1)
+                phase, pct = "analyzing", 40 + int(50 * (i - 1) / n)
+        elif "generating session report" in s:
+            phase, pct = "reporting", 93
+    if run.status == "done":
+        return "done", 100
+    if run.status in ("failed", "cancelled"):
+        return run.status, pct
+    return phase, min(pct, 98)
 
 
 class RunManager:
@@ -162,6 +196,27 @@ class RunManager:
         threading.Thread(target=self._work, args=(run,), daemon=True).start()
         return run
 
+    def cancel(self, rid: str) -> bool:
+        run = self.runs.get(rid)
+        if not run or run.status != "running":
+            return False
+        run.cancelled = True
+        run.append("cancelled by user")
+        proc = run.proc
+        if proc is not None:
+            proc.terminate()
+        return True
+
+    def terminate_all(self) -> None:
+        """Kill any live child on server shutdown (no orphaned analyses)."""
+        for run in self.runs.values():
+            if run.status == "running" and run.proc is not None:
+                run.cancelled = True
+                try:
+                    run.proc.terminate()
+                except OSError:
+                    pass
+
     def _work(self, run: Run) -> None:
         run.append("$ " + " ".join(run.argv))
         try:
@@ -171,6 +226,7 @@ class RunManager:
             proc = subprocess.Popen(run.argv, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True,
                                     errors="replace", bufsize=1)
+            run.proc = proc
             assert proc.stdout is not None
             for line in proc.stdout:
                 run.append(line)
@@ -180,7 +236,10 @@ class RunManager:
             if run.returncode is None:
                 run.returncode = -1
         finally:
-            run.status = "done" if run.returncode == 0 else "failed"
+            if run.cancelled:
+                run.status = "cancelled"
+            else:
+                run.status = "done" if run.returncode == 0 else "failed"
 
 
 # ---------------- HTTP layer ----------------
@@ -189,8 +248,10 @@ class AppState:
     def __init__(self, roots: list[Path]):
         self.roots = roots
         self.runs = RunManager()
+        self._cache: tuple[float, dict[str, SessionRef]] | None = None
+        self._cache_lock = threading.Lock()
 
-    def sessions(self) -> dict[str, SessionRef]:
+    def _scan(self) -> dict[str, SessionRef]:
         found = scan_sessions(self.roots)
         # runs may write outside the scan roots (video anywhere on disk):
         # include their out_dirs so completed runs are always reachable
@@ -199,6 +260,22 @@ class AppState:
         if extra:
             found.update(scan_sessions(extra, max_depth=0))
         return found
+
+    def sessions(self, max_age_s: float = 1.5) -> dict[str, SessionRef]:
+        """Discovered sessions, cached briefly so a page with N thumbnails
+        doesn't trigger N filesystem rescans (each frame request resolves a
+        session)."""
+        with self._cache_lock:
+            now = time.time()
+            if self._cache and now - self._cache[0] < max_age_s:
+                return self._cache[1]
+            found = self._scan()
+            self._cache = (now, found)
+            return found
+
+    def invalidate(self) -> None:
+        with self._cache_lock:
+            self._cache = None
 
     def videos(self) -> list[str]:
         return [str(v) for v in discover_videos(self.roots)]
@@ -313,6 +390,9 @@ def make_handler(state: AppState):
 
         def do_POST(self) -> None:
             url = urlparse(self.path)
+            if url.path.startswith("/cancel/"):
+                rid = url.path[len("/cancel/"):]
+                return self._json({"cancelled": state.runs.cancel(rid)})
             if url.path != "/analyze":
                 return self._notfound()
             try:
@@ -336,7 +416,7 @@ def make_handler(state: AppState):
             self._html(render_dashboard(state))
 
         def _session(self, sid: str) -> None:
-            ref = state.sessions().get(sid)
+            ref = state.sessions(max_age_s=0).get(sid)  # fresh: navigation target
             if not ref:
                 return self._notfound()
             self._html(render_session(ref))
@@ -353,11 +433,12 @@ def make_handler(state: AppState):
 
         def _export(self, sid: str) -> None:
             """Regenerate + serve the self-contained report.html for sharing."""
-            ref = state.sessions().get(sid)
+            ref = state.sessions(max_age_s=0).get(sid)
             if not ref:
                 return self._notfound()
             from .report_html import render_html
-            self._send(render_html(ref.dir, ref.doc).encode())
+            self._send(render_html(ref.dir, ref.doc).encode(),
+                       extra={"Content-Disposition": 'attachment; filename="courtside_report.html"'})
 
         def _run_page(self, rid: str) -> None:
             run = state.runs.runs.get(rid)
@@ -380,9 +461,11 @@ def make_handler(state: AppState):
                         sid = _sid_for(run.out_dir)
                 except OSError:
                     pass
+            phase, pct = derive_progress(run)
             self._json({
                 "rid": run.rid, "status": run.status, "returncode": run.returncode,
                 "elapsed_s": round(time.time() - run.started_at, 1),
+                "phase": phase, "pct": pct,
                 "log": run.tail(), "session": sid, "video": run.video,
             })
 
@@ -404,7 +487,12 @@ def main(argv: list[str] | None = None) -> int:
             roots.append(cand)
 
     state = AppState(roots)
-    httpd = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(state))
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(state))
+    except OSError as e:
+        print(f"could not start on port {args.port}: {e}\n"
+              f"another courtside-ui may be running - try:  courtside-ui --port {args.port + 1}")
+        return 1
     url = f"http://127.0.0.1:{args.port}"
     print(f"courtside-ui serving {url}  (roots: {', '.join(str(r) for r in roots)})")
     print("local only - nothing leaves this machine. Ctrl+C to stop.")
@@ -413,7 +501,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\nbye")
+        print("\nstopping - terminating any running analysis ...")
+    finally:
+        state.runs.terminate_all()
     return 0
 
 

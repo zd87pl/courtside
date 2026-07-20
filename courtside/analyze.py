@@ -67,8 +67,14 @@ def _clamp_timestamps(analysis: ClipAnalysis, seg: Segment) -> int:
     return fixed
 
 
+def _snippet(text: str) -> str:
+    """A short, readable preview of raw model output for failure logs."""
+    s = (text or "").strip()
+    return repr(s[:280] + (" ..." if len(s) > 280 else "")) if s else "<empty output>"
+
+
 def analyze_clip(vlm, clip_frames: ClipFrames, schema: dict, max_tokens: int,
-                 stream: bool = False) -> tuple[ClipAnalysis, dict]:
+                 stream: bool = False, raw_path: Path | None = None) -> tuple[ClipAnalysis, dict]:
     seg = clip_frames.segment
     prompt = SYSTEM + "\n\n" + build_clip_prompt(
         n_frames=len(clip_frames.frames),
@@ -88,10 +94,16 @@ def analyze_clip(vlm, clip_frames: ClipFrames, schema: dict, max_tokens: int,
     try:
         parsed = ClipAnalysis.model_validate(extract_json(text))
     except (ValueError, ValidationError) as e:
+        # surface what the model actually produced - saved to disk and logged so
+        # a parse failure is diagnosable instead of opaque
+        if raw_path is not None:
+            try:
+                raw_path.write_text(text or "")
+            except OSError:
+                pass
+        _log(f"    ! invalid JSON ({type(e).__name__}); model said: {_snippet(text)}")
         # one repair round: keep the frames AND the schema in view so the model
-        # can actually correct against them (finding: repair ran without images
-        # or schema).
-        _log(f"    ! invalid JSON ({type(e).__name__}), retrying once")
+        # can actually correct against them.
         repair = (
             "Your previous output was invalid JSON for the required schema.\n"
             f"Error: {e}\n\nRequired JSON schema:\n{json.dumps(schema)}\n\n"
@@ -100,8 +112,19 @@ def analyze_clip(vlm, clip_frames: ClipFrames, schema: dict, max_tokens: int,
         )
         text2, stats2 = vlm.generate(repair, images=clip_frames.frames, max_tokens=max_tokens,
                                      temperature=0.0, json_schema=schema)
-        parsed = ClipAnalysis.model_validate(extract_json(text2))
         stats.wall_s += stats2.wall_s
+        try:
+            parsed = ClipAnalysis.model_validate(extract_json(text2))
+        except (ValueError, ValidationError) as e2:
+            if raw_path is not None:
+                try:
+                    raw_path.with_suffix(".repair.txt").write_text(text2 or "")
+                except OSError:
+                    pass
+            raise ValueError(
+                f"model did not return valid JSON after one repair "
+                f"({type(e2).__name__}). repair output: {_snippet(text2)}"
+            ) from e2
     # trust the pipeline's clip boundaries over the model's
     parsed.start_s, parsed.end_s = seg.start_s, seg.end_s
     n_fixed = _clamp_timestamps(parsed, seg)
@@ -154,26 +177,24 @@ def _prefetch(repo: str) -> int:
 
 # ---------------- report building ----------------
 
-def _write_reports(out_dir: Path, session_doc: dict, analyses: list[ClipAnalysis],
-                   fps_used_values: list[float], vlm=None) -> None:
-    """Compute facts, (optionally) generate the Markdown report, write HTML."""
-    facts = session_doc["facts"]
-    res_s = report.frame_resolution_s(fps_used_values)
+def _generate_markdown(vlm, analyses: list[ClipAnalysis], facts: dict, res_s: float) -> str:
+    """Model pass that writes the prose coaching report (Markdown)."""
+    _log("generating session report ...")
+    session_dicts = [a.model_dump() for a in analyses]
+    report_text, _ = vlm.generate(
+        SYSTEM + "\n\n" + build_report_prompt(session_dicts, facts),
+        images=None, max_tokens=2400, temperature=0.4,
+    )
+    return strip_think(report_text).strip() + "\n" + limitations_footer(res_s)
 
-    if vlm is not None and analyses:
-        _log("generating session report ...")
-        session_dicts = [a.model_dump() for a in analyses]
-        report_text, _ = vlm.generate(
-            SYSTEM + "\n\n" + build_report_prompt(session_dicts, facts),
-            images=None, max_tokens=2400, temperature=0.4,
-        )
-        report_text = strip_think(report_text).strip()
-        (out_dir / "session_report.md").write_text(report_text + "\n" + limitations_footer(res_s))
-        _log(f"report written: {out_dir / 'session_report.md'}")
 
+def _finalize_reports(out_dir: Path, session_doc: dict, markdown: str | None) -> None:
+    """Persist session.json, the Markdown report, and the self-contained HTML."""
+    if markdown is not None:
+        (out_dir / "session_report.md").write_text(markdown)
     (out_dir / "session.json").write_text(json.dumps(session_doc, indent=2))
     html_path = write_html_report(out_dir, session_doc)
-    _log(f"HTML report: {html_path}")
+    _log(f"reports written: {out_dir / 'session_report.md'} + {html_path.name}")
 
 
 def _replay(out_dir: Path) -> int:
@@ -275,6 +296,9 @@ def main(argv: list[str] | None = None) -> int:
     duration = probe_duration(video)
     _log(f"video: {video.name}  ({duration/60:.1f} min)")
 
+    # true end-to-end wall clock starts here (segmentation onward)
+    pipeline_t0 = time.perf_counter()
+
     # 1) segment (reuse the activity curve for the report timeline)
     t0 = time.perf_counter()
     curve: ActivityCurve | None = None
@@ -302,12 +326,8 @@ def main(argv: list[str] | None = None) -> int:
     if curve is not None:
         (out_dir / "activity.json").write_text(json.dumps({"times": curve.times, "scores": curve.scores}))
 
-    # rough runtime heads-up so a full-match run doesn't silently commit to hours
-    if duration > 0:
-        est_min = sum(s.duration for s in segments) / 60 * 1.5
-        _log(f"  heads-up: ~{len(segments)} clips to analyze (rough order-of-minutes on a big model).")
-
     # 2) frames
+    t_extract = time.perf_counter()
     clips: list[ClipFrames] = []
     for i, seg in enumerate(segments):
         try:
@@ -318,6 +338,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         clips.append(cf)
         _log(f"  clip {i:03d}  {seg.start_s:7.1f}-{seg.end_s:7.1f}s  {len(cf.frames)} frames @ {cf.fps_used:.2f} fps")
+    extract_s = time.perf_counter() - t_extract
 
     if args.dry_run:
         _log("dry run complete - frames are on disk, no model loaded")
@@ -328,6 +349,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # 3) VLM backend
     backend = "server" if args.server_url else "local"
+    model_load_s = 0.0
     if args.server_url:
         if not args.server_model:
             p.error("--server-url requires --server-model")
@@ -350,6 +372,7 @@ def main(argv: list[str] | None = None) -> int:
                  "Off-Mac, use --server-url against an OpenAI-compatible endpoint.")
             return 2
         model_name = repo
+        model_load_s = vlm.load_s
         _log(f"loaded in {vlm.load_s:.1f}s")
 
     schema = clip_json_schema()
@@ -361,10 +384,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for i, cf in enumerate(clips):
             clip_json_path = out_dir / f"clip_{i:03d}.json"
+            stats_path = out_dir / f"clip_{i:03d}.stats.json"
             if args.resume and clip_json_path.exists():
                 try:
                     analysis = ClipAnalysis.model_validate_json(clip_json_path.read_text())
                     analyses.append(analysis)
+                    # reload cached timing/token stats so a resumed run still
+                    # reports honest totals (finding: resume undercounted metrics)
+                    if stats_path.exists():
+                        try:
+                            per_clip_stats.append(json.loads(stats_path.read_text()))
+                        except (ValueError, OSError):
+                            pass
                     clip_records.append({"index": i, "frame_dir": f"clip_{i:03d}",
                                          "fps_used": cf.fps_used, "n_frames": len(cf.frames),
                                          "status": "ok", "analysis": analysis.model_dump()})
@@ -374,7 +405,8 @@ def main(argv: list[str] | None = None) -> int:
                     pass  # fall through to re-analyze
             _log(f"[{i+1}/{len(clips)}] analyzing clip {cf.segment.start_s:.1f}-{cf.segment.end_s:.1f}s ...")
             try:
-                analysis, stats = analyze_clip(vlm, cf, schema, args.max_tokens, stream=args.stream)
+                analysis, stats = analyze_clip(vlm, cf, schema, args.max_tokens, stream=args.stream,
+                                               raw_path=out_dir / f"clip_{i:03d}.raw.txt")
             except KeyboardInterrupt:
                 interrupted = True
                 _log("\n  interrupted - finishing with the clips completed so far")
@@ -389,6 +421,7 @@ def main(argv: list[str] | None = None) -> int:
             analyses.append(analysis)
             per_clip_stats.append(stats)
             clip_json_path.write_text(analysis.model_dump_json(indent=2))
+            stats_path.write_text(json.dumps(stats))
             clip_records.append({"index": i, "frame_dir": f"clip_{i:03d}", "fps_used": cf.fps_used,
                                  "n_frames": len(cf.frames), "status": "ok", "analysis": analysis.model_dump()})
             n_flags = sum(len(s.technique_flags) + len(s.tactical_flags) for s in analysis.strokes)
@@ -402,9 +435,22 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         facts = report.compute_session_facts(analyses)
+        fps_used_values = [c["fps_used"] for c in clip_records if c.get("fps_used")]
+        res_s = report.frame_resolution_s(fps_used_values)
+
+        t_report = time.perf_counter()
+        markdown = _generate_markdown(vlm, analyses, facts, res_s)
+        report_s = time.perf_counter() - t_report
+
+        # honest end-to-end wall clock: everything since segmentation began,
+        # including model load, frame extraction, inference, and this report pass
+        total_wall_s = time.perf_counter() - pipeline_t0
         run_stats = report.aggregate_run_stats(
             per_clip_stats, video_duration_s=duration, segment_s=segment_s,
             clips_ok=len(analyses), clips_failed=clips_failed,
+            total_wall_s=total_wall_s,
+            timings={"segment_s": segment_s, "extract_s": extract_s,
+                     "model_load_s": model_load_s, "report_s": report_s},
         )
         session_doc = report.build_session_doc(
             version=__version__, video_name=video.name, video_duration_s=duration,
@@ -414,8 +460,7 @@ def main(argv: list[str] | None = None) -> int:
             created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             run_stats=run_stats, facts=facts, clips=clip_records,
         )
-        fps_used_values = [c["fps_used"] for c in clip_records if c.get("fps_used")]
-        _write_reports(out_dir, session_doc, analyses, fps_used_values, vlm=vlm)
+        _finalize_reports(out_dir, session_doc, markdown)
         _log("\n" + report.cost_summary_line(run_stats))
     finally:
         vlm.close()
