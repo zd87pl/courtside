@@ -135,14 +135,25 @@ class LocalVLM:
 
 
 class ServerVLM:
-    """OpenAI-compatible client. Local files are sent as base64 data URLs."""
+    """OpenAI-compatible client (mlx_vlm.server, LM Studio, OpenRouter, ...).
 
-    def __init__(self, base_url: str, model: str, api_key: str = "not-needed", timeout: float = 120.0):
+    Local frames are sent as base64 data URLs - with a hosted endpoint like
+    OpenRouter they leave the machine, so callers must label such runs as
+    cloud, never on-device.
+    """
+
+    def __init__(self, base_url: str, model: str, api_key: str | None = None,
+                 timeout: float = 180.0):
+        import os
+
         from openai import OpenAI  # optional dependency: pip install .[server]
 
-        self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        key = api_key or os.environ.get("OPENROUTER_API_KEY") \
+            or os.environ.get("OPENAI_API_KEY") or "not-needed"
+        self.client = OpenAI(base_url=base_url, api_key=key, timeout=timeout)
         self.model = model
         self.load_s = 0.0
+        self._schema_ok = True  # flips off after a server rejects response_format
 
     def ping(self) -> None:
         """Fail fast if the server is unreachable (finding: dead server hangs)."""
@@ -172,14 +183,26 @@ class ServerVLM:
             max_tokens=max_tokens,
             temperature=temperature,
         )
-        if json_schema is not None:
+        use_schema = json_schema is not None and self._schema_ok
+        if use_schema:
             req["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {"name": "ClipAnalysis", "strict": True, "schema": json_schema},
             }
 
         t0 = time.perf_counter()
-        resp = self.client.chat.completions.create(**req)
+        try:
+            resp = self.client.chat.completions.create(**req)
+        except Exception as e:
+            # Some hosted models (e.g. via OpenRouter) reject response_format.
+            # Fall back to prompt-only JSON once and stop sending the schema -
+            # the Pydantic validate-and-repair path is the backstop anyway.
+            if use_schema and getattr(e, "status_code", None) == 400:
+                self._schema_ok = False
+                req.pop("response_format", None)
+                resp = self.client.chat.completions.create(**req)
+            else:
+                raise
         wall = time.perf_counter() - t0
         text = resp.choices[0].message.content or ""
         usage = getattr(resp, "usage", None)

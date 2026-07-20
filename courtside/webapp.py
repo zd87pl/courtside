@@ -281,9 +281,15 @@ class AppState:
         return [str(v) for v in discover_videos(self.roots)]
 
 
-# the only form fields the UI offers; anything else in a POST body is dropped
-# (e.g. a smuggled server_url would silently ship frames off-device)
-ALLOWED_FORM_FIELDS = {"video", "model", "quick", "offline", "dry_run"}
+# the only form fields the UI offers; anything else in a POST body is dropped.
+# A raw server_url is still never accepted - the only cloud path is the
+# explicit OpenRouter option below, clearly labeled in the UI, keyed by an env
+# var on the server process (never by a form value).
+ALLOWED_FORM_FIELDS = {"video", "model", "quick", "offline", "dry_run",
+                       "use_openrouter", "cloud_model"}
+
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
+DEFAULT_CLOUD_MODEL = "qwen/qwen2.5-vl-72b-instruct"
 
 
 def _analyze_argv(form: dict[str, str], out_dir: Path) -> list[str]:
@@ -298,6 +304,9 @@ def _analyze_argv(form: dict[str, str], out_dir: Path) -> list[str]:
         argv += ["--dry-run"]
     if form.get("download_dir"):
         argv += ["--download-dir", form["download_dir"]]
+    if form.get("server_url"):  # set internally only (OpenRouter path)
+        argv += ["--server-url", form["server_url"],
+                 "--server-model", form.get("server_model") or DEFAULT_CLOUD_MODEL]
     # "--" ends option parsing so a filename like "-weird.mp4" can't be
     # mistaken for a flag by the child's argparse
     argv += ["--", form["video"]]
@@ -313,6 +322,16 @@ def build_analysis_request(form: dict[str, str], roots: list[Path]) -> tuple[lis
     video = (form.get("video") or "").strip()
     if not video:
         raise ValueError("Choose a video, or enter a path or YouTube URL.")
+
+    if form.get("use_openrouter"):
+        import os
+        if form.get("offline"):
+            raise ValueError("Offline mode and the OpenRouter cloud backend are mutually exclusive.")
+        if not (os.environ.get("OPENROUTER_API_KEY") or "").strip():
+            raise ValueError("OpenRouter needs an API key: restart the app with "
+                             "OPENROUTER_API_KEY=sk-or-... courtside-ui")
+        form = dict(form, server_url=OPENROUTER_URL,
+                    server_model=(form.get("cloud_model") or DEFAULT_CLOUD_MODEL).strip())
 
     if is_url(video):
         if form.get("offline"):

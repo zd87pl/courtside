@@ -159,8 +159,39 @@ courtside match.mp4 --server-url http://localhost:8080/v1 \
 ```
 
 courtside pings the server before starting and uses a request timeout, so an unreachable
-endpoint fails fast instead of hanging. (Not every server enforces strict mode; the
-Pydantic validate-and-repair path is always the backstop.)
+endpoint fails fast instead of hanging. (Not every server enforces strict mode; if one
+rejects the schema with a 400 courtside retries without it — the Pydantic
+validate-and-repair path is always the backstop.)
+
+### Cloud fallback via OpenRouter
+
+The same server backend works against [OpenRouter](https://openrouter.ai), which is handy
+as a fallback while debugging local inference or for machines without Apple Silicon:
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+courtside match.mp4 --server-url https://openrouter.ai/api/v1 \
+  --server-model qwen/qwen2.5-vl-72b-instruct
+```
+
+The web UI has the same option ("use a cloud model via OpenRouter" on the analyze form;
+start `courtside-ui` with `OPENROUTER_API_KEY` set). **Be aware this inverts the privacy
+story: frames are uploaded to the API for that run.** Cloud runs are labeled accordingly —
+the report says "frames uploaded" and never claims $0 / 0-bytes.
+
+### courtside-doctor
+
+If local generation misbehaves (e.g. `<empty output>`), run:
+
+```bash
+courtside-doctor                      # synthetic test frame
+courtside-doctor --video match.mp4    # real frames from your footage
+```
+
+It drives mlx-vlm's canonical generate path at 1 / 8 / 32 frames plus the real courtside
+prompt, prints tokens/finish-reason per step, and ends with a specific diagnosis
+(generation-stack regression → pin `mlx-vlm==0.6.3`; frame-count/memory ceiling →
+lower `--max-frames`/`--max-side` or raise the GPU wired limit; prompt-specific → report it).
 
 ## Tuning knobs
 

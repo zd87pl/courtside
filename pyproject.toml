@@ -14,8 +14,10 @@ dependencies = [
 [project.optional-dependencies]
 # mlx-vlm is Apple-Silicon-only; keeping it out of the core deps means the
 # model-free parts (segmentation, schema, reports) install and test anywhere.
-# Pinned tightly because mlx-vlm's API churns across minor versions.
-local = ["mlx-vlm>=0.6.5,<0.7"]
+# Bounded <0.7 for API churn; floor at 0.6.0 so mlx-vlm==0.6.3 stays
+# installable - 0.6.4+ has a reported Qwen-family generation regression
+# (Blaizzy/mlx-vlm#1526) and 0.6.3 is the known-good fallback.
+local = ["mlx-vlm>=0.6.0,<0.7"]
 server = ["openai>=1.40"]
 youtube = ["yt-dlp>=2024.10.0"]
 dev = ["pytest>=8.0"]
@@ -24,6 +26,7 @@ dev = ["pytest>=8.0"]
 courtside = "courtside.analyze:main"
 courtside-bench = "courtside.bench:main"
 courtside-ui = "courtside.webapp:main"
+courtside-doctor = "courtside.doctor:main"
 
 [build-system]
 requires = ["hatchling"]

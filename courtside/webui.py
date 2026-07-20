@@ -451,6 +451,21 @@ def render_dashboard(state, error: str | None = None) -> str:
         <label><input type="checkbox" name="offline" value="1"> offline</label>
         <label><input type="checkbox" name="dry_run" value="1"> plumbing only</label>
       </div></div>
+    <div class="full" style="border-top:1px solid var(--border-2);padding-top:13px">
+      <div class="checks" style="margin-bottom:9px">
+        <label><input type="checkbox" name="use_openrouter" value="1"
+          onchange="document.getElementById('cloudrow').style.display=this.checked?'block':'none'">
+          use a cloud model via OpenRouter</label>
+        <span class="note" style="color:var(--warn)">frames are uploaded to OpenRouter for that run
+          &mdash; not on-device</span>
+      </div>
+      <div id="cloudrow" style="display:none;max-width:420px">
+        <label class="f" for="cloud_model">OpenRouter model</label>
+        <input type="text" id="cloud_model" name="cloud_model" value="qwen/qwen2.5-vl-72b-instruct">
+        <div class="note" style="margin-top:5px">needs <code>OPENROUTER_API_KEY</code> set when
+          starting <code>courtside-ui</code></div>
+      </div>
+    </div>
     <div class="full cta-row"><button class="btn-pri" type="submit">{_ICONS['bolt']} Analyze</button>
       <span class="note">Quick pass analyzes the first 3 rallies for a fast first result.</span></div>
   </form>
@@ -608,7 +623,7 @@ def render_session(ref) -> str:
   <div class="tile"><b class="tnum">{_e(_dget(facts, "clips_analyzed", 0))}</b><span>rallies</span></div>
   <div class="tile"><b class="tnum">{_e(_dget(split, "near", 0))} / {_e(_dget(split, "far", 0))}</b><span>near / far</span></div>
   <div class="tile accent"><b class="tnum">{_e(rt) if rt else "&mdash;"}&times;</b><span>realtime</span><div class="sub">end-to-end</div></div>
-  <div class="tile"><b class="tnum">${_e(cloud) if cloud is not None else "0.00"}</b><span>cloud-equiv</span><div class="sub">on-device: $0</div></div>
+  <div class="tile"><b class="tnum">${_e(cloud) if cloud is not None else "0.00"}</b><span>{"cloud-equiv" if _dget(doc, "on_device") else "cloud cost (est.)"}</span>{'<div class="sub">on-device: $0</div>' if _dget(doc, "on_device") else '<div class="sub">frames uploaded</div>'}</div>
   <div class="tile"><b class="tnum">{_e(peak) if peak else "&mdash;"}</b><span>peak GB</span>{f'<div class="sub">{_e(fail)} clip(s) skipped</div>' if fail else ''}</div>
 </div>""")
 
