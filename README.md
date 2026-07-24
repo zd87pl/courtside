@@ -29,7 +29,16 @@ Prefer to see output before installing anything? Open
 [`examples/demo_session/report.html`](examples/demo_session/) — a complete run you can
 inspect without a Mac, a GPU, or a model download.
 
-## Web app
+## Cloud SaaS (Vercel)
+
+A deployable multi-tenant version lives in [`cloud/`](cloud/): coach & player accounts,
+school teams with invite codes, browser-side segmentation (the video never uploads —
+only sampled frames), OpenRouter analysis, and Postgres persistence. Point Vercel at the
+repo with Root Directory `cloud`, add the Neon integration + `OPENROUTER_API_KEY`, and
+deploy — full steps in [cloud/README.md](cloud/README.md). The local demo below is
+completely independent of it.
+
+## Web app (local)
 
 ```bash
 courtside-ui        # serves http://127.0.0.1:8799 (localhost only)
