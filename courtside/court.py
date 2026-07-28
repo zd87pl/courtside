@@ -70,6 +70,22 @@ def detect_court_homography(frame_path: Path) -> np.ndarray | None:
     d = np.diff(pts, axis=1).ravel()
     ordered = np.array([pts[np.argmin(s)], pts[np.argmin(d)],
                         pts[np.argmax(s)], pts[np.argmax(d)]], dtype=np.float32)
+    if not cv2.isContourConvex(ordered.astype(np.int32)):
+        return None
+    # a court seen from a normal camera position projects with the near
+    # baseline wider than the far one and meaningful height; razor-thin or
+    # inverted quads are detector misfires, not courts
+    top_w = float(np.linalg.norm(ordered[1] - ordered[0]))
+    bot_w = float(np.linalg.norm(ordered[2] - ordered[3]))
+    height = float(abs(ordered[3][1] - ordered[0][1]))
+    if max(top_w, bot_w) <= 0 or height < 0.08 * h:
+        return None
+    if min(top_w, bot_w) / max(top_w, bot_w) < 0.15:
+        return None
+    # a court's projected height is a substantial fraction of its width even at
+    # shallow camera angles; a wide thin band is a banner/strip, not a court
+    if height / max(top_w, bot_w) < 0.2:
+        return None
     # far baseline at y=0, near baseline at y=COURT_L
     court = np.array([[0, 0], [COURT_W, 0], [COURT_W, COURT_L], [0, COURT_L]],
                      dtype=np.float32)
@@ -109,6 +125,53 @@ def position_zone(x_m: float, y_m: float) -> dict[str, str]:
     lateral = "left" if x < third else ("right" if x > 2 * third else "center")
     return {"half": "near" if near else "far", "depth": depth, "lateral": lateral,
             "lane": lane_for_x(x), "zone": f"{depth}_{lateral}"}
+
+
+def _map_positions(H: np.ndarray, records: list[dict[str, Any]],
+                   ) -> list[tuple[dict[str, Any], float, float, dict[str, str]]]:
+    """Project each record's ankle_px through H, keeping only points whose
+    computed court half agrees with the VLM's near/far call for that stroke.
+
+    A wrong homography (the white-quad detector latching onto a scoreboard or
+    banner) maps every ankle to roughly the same off-court point - the
+    half-vs-player check kills those points individually (finding: all court
+    dots plotted at one corner on real 4K footage)."""
+    out = []
+    for r in records:
+        xy = r.get("ankle_px")
+        if not xy:
+            continue
+        court_xy = image_to_court(H, (float(xy[0]), float(xy[1])))
+        if court_xy is None:
+            continue
+        zone = position_zone(*court_xy)
+        if r.get("player") in ("near", "far") and zone["half"] != r["player"]:
+            continue
+        out.append((r, court_xy[0], court_xy[1], zone))
+    return out
+
+
+def _positions_plausible(mapped: list, n_candidates: int) -> tuple[bool, str]:
+    """Sanity verdict for a set of projected positions.
+
+    Rejects the degenerate signatures of a bad homography: almost no points
+    surviving projection, or rally strokes all collapsed onto one spot. The
+    collapse check deliberately exempts serve-dominated sets - a player
+    serving repeatedly from one station is legitimate footage, and rally
+    strokes are what provably require movement (finding: serve-drill sessions
+    were falsely rejected as collapsed)."""
+    if not mapped:
+        return False, "no positions survived projection"
+    if n_candidates >= 4 and len(mapped) / n_candidates < 0.4:
+        return False, (f"only {len(mapped)}/{n_candidates} positions were "
+                       "geometrically consistent")
+    non_serve = [m for m in mapped if m[0].get("stroke") != "serve"]
+    if len(mapped) >= 4 and len(non_serve) >= 2:
+        xs = np.array([m[1] for m in mapped])
+        ys = np.array([m[2] for m in mapped])
+        if float(xs.std() + ys.std()) < 0.8:
+            return False, "all positions collapsed onto one spot"
+    return True, ""
 
 
 def build_serve_return_map(
@@ -154,33 +217,37 @@ def build_serve_return_map(
     }
 
     H = detect_court_homography(anchor_frame) if anchor_frame and anchor_frame.exists() else None
+    doc["court_detected"] = False
     if H is not None:
-        zsum: dict[str, dict[str, int]] = {}
-        for r in sr:
-            xy = r.get("ankle_px")
-            if not xy:
-                continue
-            court_xy = image_to_court(H, (float(xy[0]), float(xy[1])))
-            if court_xy is None:
-                continue
-            zone = position_zone(*court_xy)
-            flagged = any(abs(r["t_s"] - t) < 0.35 for t in flagged_ts)
-            quality = (r.get("contact") or {}).get("quality", "acceptable")
-            doc["positions"].append({
-                "t_s": r["t_s"], "player": r["player"], "stroke": r["stroke"],
-                "x_m": court_xy[0], "y_m": court_xy[1],
-                "zone": zone["zone"], "half": zone["half"],
-                "quality": quality, "flagged": flagged,
-            })
-            key = f'{r["stroke"]}:{zone["zone"]}'
-            b = zsum.setdefault(key, {"count": 0, "poor": 0, "flagged": 0})
-            b["count"] += 1
-            b["poor"] += 1 if quality == "poor" else 0
-            b["flagged"] += 1 if flagged else 0
-        doc["zones_summary"] = zsum
-        doc["court_detected"] = True
-    else:
-        doc["court_detected"] = False
+        candidates = [r for r in sr if r.get("ankle_px")]
+        if not candidates:
+            # court found; there is simply nothing to place on it
+            doc["court_detected"] = True
+            doc["note"] += " No player positions could be measured (no ankle keypoints)."
+            out_path.write_text(json.dumps(doc, indent=2))
+            return doc
+        mapped = _map_positions(H, candidates)
+        ok, reason = _positions_plausible(mapped, len(candidates))
+        if not ok:
+            doc["note"] += f" Court positions dropped: {reason}."
+        else:
+            zsum: dict[str, dict[str, int]] = {}
+            for r, x_m, y_m, zone in mapped:
+                flagged = any(abs(r["t_s"] - t) < 0.35 for t in flagged_ts)
+                quality = (r.get("contact") or {}).get("quality", "acceptable")
+                doc["positions"].append({
+                    "t_s": r["t_s"], "player": r["player"], "stroke": r["stroke"],
+                    "x_m": x_m, "y_m": y_m,
+                    "zone": zone["zone"], "half": zone["half"],
+                    "quality": quality, "flagged": flagged,
+                })
+                key = f'{r["stroke"]}:{zone["zone"]}'
+                b = zsum.setdefault(key, {"count": 0, "poor": 0, "flagged": 0})
+                b["count"] += 1
+                b["poor"] += 1 if quality == "poor" else 0
+                b["flagged"] += 1 if flagged else 0
+            doc["zones_summary"] = zsum
+            doc["court_detected"] = True
 
     out_path.write_text(json.dumps(doc, indent=2))
     return doc
@@ -221,6 +288,19 @@ def build_error_matrix(
         doc["court_detected"] = False
         out_path.write_text(json.dumps(doc, indent=2))
         return doc
+    candidates = [r for r in records if r.get("ankle_px")]
+    if not candidates:
+        doc["court_detected"] = True
+        doc["note"] += " No player positions could be measured (no ankle keypoints)."
+        out_path.write_text(json.dumps(doc, indent=2))
+        return doc
+    mapped = _map_positions(H, candidates)
+    ok, reason = _positions_plausible(mapped, len(candidates))
+    if not ok:
+        doc["court_detected"] = False
+        doc["note"] += f" Positions dropped: {reason}."
+        out_path.write_text(json.dumps(doc, indent=2))
+        return doc
     doc["court_detected"] = True
 
     def info_for(t: float) -> dict[str, Any]:
@@ -232,14 +312,8 @@ def build_error_matrix(
         return best or {}
 
     sev_rank = {"low": 1, "medium": 2, "high": 3}
-    for r in records:
-        xy = r.get("ankle_px")
-        if not xy:
-            continue
-        court_xy = image_to_court(H, (float(xy[0]), float(xy[1])))
-        if court_xy is None:
-            continue
-        zone = position_zone(*court_xy)
+    for r, x_m, y_m, zone in mapped:
+        court_xy = (x_m, y_m)
         cell = f'{zone["depth"]}:{zone["lane"]}'
         si = info_for(float(r["t_s"]))
         outcome = si.get("outcome", "unknown")
@@ -290,17 +364,15 @@ def build_courtmap(anchor_frame: Path, positions: list[dict[str, Any]],
     H = detect_court_homography(anchor_frame)
     if H is None:
         return None
-    mapped = []
-    for p in positions:
-        xy = p.get("xy")
-        if not xy:
-            continue
-        court_xy = image_to_court(H, (float(xy[0]), float(xy[1])))
-        if court_xy is None:
-            continue
-        mapped.append({"t_s": p.get("t_s"), "player": p.get("player"),
-                       "code": p.get("code"), "severity": p.get("severity"),
-                       "x_m": court_xy[0], "y_m": court_xy[1]})
+    candidates = [dict(p, ankle_px=p.get("xy")) for p in positions if p.get("xy")]
+    projected = _map_positions(H, candidates)
+    ok, _reason = _positions_plausible(projected, len(candidates))
+    if not ok:
+        return None
+    mapped = [{"t_s": p.get("t_s"), "player": p.get("player"),
+               "code": p.get("code"), "severity": p.get("severity"),
+               "x_m": x_m, "y_m": y_m}
+              for p, x_m, y_m, _zone in projected]
     if not mapped:
         return None
     doc = {"court_w_m": COURT_W, "court_l_m": COURT_L, "positions": mapped,

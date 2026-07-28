@@ -32,11 +32,16 @@ class Segment:
 
 @dataclass
 class ActivityCurve:
-    """Motion-energy trace kept for the report timeline (segment.py:3-11)."""
+    """Motion-energy trace kept for the report timeline (segment.py:3-11).
+
+    ``motion_map`` accumulates WHERE motion happened (downscaled float image);
+    it drives the auto-crop for high-resolution distant-camera footage.
+    """
 
     times: list[float]
     scores: list[float]
     duration: float
+    motion_map: "np.ndarray | None" = None
 
 
 def _probe_duration_cv(cap: "cv2.VideoCapture", src_fps: float, times: list[float]) -> float:
@@ -64,6 +69,7 @@ def _activity_curve(video_path: Path, sample_fps: float = 5.0, width: int = 320)
 
     times: list[float] = []
     scores: list[float] = []
+    motion_map: np.ndarray | None = None
     prev = None
     idx = 0
     while True:
@@ -78,14 +84,25 @@ def _activity_curve(video_path: Path, sample_fps: float = 5.0, width: int = 320)
             small = cv2.resize(frame, (width, h), interpolation=cv2.INTER_AREA)
             gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
             if prev is not None:
-                scores.append(float(np.mean(np.abs(gray - prev))))
+                diff = np.abs(gray - prev)
+                # Localized motion score: two distant players on a wide 4K frame
+                # move well under 1% of pixels, so a whole-frame mean drowns real
+                # rallies in codec noise. The mean of the top ~2% of pixel diffs
+                # responds to small movers and still saturates on global motion
+                # (finding: 4K match footage produced only a few short clips).
+                k = max(1, diff.size // 50)
+                top = np.partition(diff.ravel(), diff.size - k)[-k:]
+                scores.append(float(np.mean(top)))
+                if motion_map is None:
+                    motion_map = np.zeros_like(diff)
+                motion_map += diff
                 times.append(idx / src_fps)
             prev = gray
         idx += 1
 
     duration = _probe_duration_cv(cap, src_fps, times)
     cap.release()
-    return ActivityCurve(times=times, scores=scores, duration=duration)
+    return ActivityCurve(times=times, scores=scores, duration=duration, motion_map=motion_map)
 
 
 def detect_segments(
@@ -113,8 +130,19 @@ def detect_segments(
     if len(scores) == 0:
         return []
 
-    ref = float(np.percentile(scores, 95)) or 1.0
-    enter_t, exit_t = enter_frac * ref, exit_frac * ref
+    # Thresholds relative to the noise floor, not to zero: changeover footage
+    # with a loud outlier (someone walking near the camera) must not push real
+    # rallies below the enter threshold, and quiet 4K footage must not treat
+    # sensor noise as activity (finding: p95-relative thresholds missed rallies).
+    # The peak reference is p99.5, not p95: on mostly-idle footage (a few
+    # rallies in an hour) p95 is itself a noise quantile and the enter
+    # threshold would land inside the noise bulk (finding: junk segments on
+    # mostly-idle footage).
+    floor = float(np.percentile(scores, 20))
+    peak = float(np.percentile(scores, 99.5))
+    rng = max(peak - floor, 1e-6)
+    enter_t = floor + enter_frac * rng
+    exit_t = floor + exit_frac * rng
 
     raw: list[Segment] = []
     active = False
@@ -136,11 +164,13 @@ def detect_segments(
         else:
             merged.append(seg)
 
-    # constant-motion sanity check: one blob spanning ~the whole video is a
-    # detector misfire, not a single giant rally.
+    # constant-motion sanity check: "active" covering ~the whole video is a
+    # detector misfire (moving camera, or thresholds inside the noise bulk),
+    # not real segmentation - regardless of how many blobs it fragmented into.
+    # Returning [] triggers the caller's explicit fixed-window fallback.
     if duration > 0 and merged:
         covered = sum(s.duration for s in merged)
-        if covered >= min_active_frac * duration and len(merged) <= 1:
+        if covered >= min_active_frac * duration:
             return []
 
     # pad, clamp, drop short, split long
@@ -158,6 +188,55 @@ def detect_segments(
         if e - s >= min_rally_s:
             final.append(Segment(s, e))
     return final
+
+
+def motion_crop_box(curve: ActivityCurve, frame_w: int, frame_h: int,
+                    pad_frac: float = 0.12, min_dim_frac: float = 0.40,
+                    max_area_frac: float = 0.80) -> tuple[int, int, int, int] | None:
+    """Source-pixel crop (x, y, w, h) around where the match actually happens.
+
+    On distant fixed-camera 4K footage most of the frame is stands/sky/side
+    courts; cropping to the accumulated-motion region before downscaling is an
+    automatic "zoom in" that makes players and ball legible to every stage.
+    Returns None when cropping would not help (motion covers most of the frame)
+    or looks untrustworthy (motion region implausibly small).
+    """
+    mm = curve.motion_map
+    if mm is None or mm.size == 0 or float(mm.max()) <= 0:
+        return None
+    m = cv2.GaussianBlur(mm, (9, 9), 0)
+    mask = m >= 0.18 * float(m.max())
+    ys, xs = np.nonzero(mask)
+    if len(xs) < 8:
+        return None
+    mh, mw = m.shape
+    x0, x1 = xs.min() / mw, (xs.max() + 1) / mw
+    y0, y1 = ys.min() / mh, (ys.max() + 1) / mh
+    # pad, then enforce a minimum size so a partial court is never cut off
+    x0, x1 = max(0.0, x0 - pad_frac), min(1.0, x1 + pad_frac)
+    y0, y1 = max(0.0, y0 - pad_frac), min(1.0, y1 + pad_frac)
+    def widen(lo: float, hi: float) -> tuple[float, float]:
+        if hi - lo >= min_dim_frac:
+            return lo, hi
+        need = (min_dim_frac - (hi - lo)) / 2
+        lo, hi = lo - need, hi + need
+        if lo < 0:
+            hi, lo = min(1.0, hi - lo), 0.0
+        if hi > 1:
+            lo, hi = max(0.0, lo - (hi - 1.0)), 1.0
+        return lo, hi
+    x0, x1 = widen(x0, x1)
+    y0, y1 = widen(y0, y1)
+    if (x1 - x0) * (y1 - y0) >= max_area_frac:
+        return None  # crop would barely zoom; not worth diverging from source
+    # snap to even source pixels (codec-friendly)
+    cx = int(x0 * frame_w) // 2 * 2
+    cy = int(y0 * frame_h) // 2 * 2
+    cw = min(frame_w - cx, int((x1 - x0) * frame_w) // 2 * 2)
+    ch = min(frame_h - cy, int((y1 - y0) * frame_h) // 2 * 2)
+    if cw < 64 or ch < 64:
+        return None
+    return cx, cy, cw, ch
 
 
 def fixed_windows(video_path: Path, window_s: float) -> list[Segment]:
