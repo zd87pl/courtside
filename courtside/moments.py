@@ -144,12 +144,18 @@ def assess_session_contacts(video: Path, analyses: list[ClipAnalysis], out_dir: 
     import shutil
 
     from .ball import assess_contact, summarize_contacts
+    from .pose import ankle_midpoint
 
-    strokes = [s for a in analyses for s in a.strokes][:cap]
+    # serves and returns first: they anchor the serve/return court analysis,
+    # so the cap must never crowd them out
+    all_strokes = [s for a in analyses for s in a.strokes]
+    strokes = (sorted((s for s in all_strokes if s.stroke in ("serve", "return")), key=lambda s: s.t_s)
+               + sorted((s for s in all_strokes if s.stroke not in ("serve", "return")), key=lambda s: s.t_s))[:cap]
     if not strokes or estimator is None:
         return {}
     workdir = out_dir / "moments" / "contact_sweep"
     records: list[dict[str, Any]] = []
+    anchor_saved = False
     for j, s in enumerate(strokes):
         try:
             frames, start_s, fps = extract_window_frames(
@@ -161,10 +167,18 @@ def assess_session_contacts(video: Path, analyses: list[ClipAnalysis], out_dir: 
             pose = win.poses[win.contact_idx]
             if pose is None:
                 continue
+            if not anchor_saved:
+                # one full frame kept for court-homography detection later
+                shutil.copyfile(win.frame_paths[win.contact_idx], out_dir / "court_anchor.jpg")
+                anchor_saved = True
             c = assess_contact(pose, s.stroke, win.frame_paths, win.contact_idx, ball_detector)
             if c:
-                records.append({"t_s": s.t_s, "player": s.player, "stroke": s.stroke,
-                                "contact": {k: v for k, v in c.items() if k != "lines_px"}})
+                rec: dict[str, Any] = {"t_s": s.t_s, "player": s.player, "stroke": s.stroke,
+                                       "contact": {k: v for k, v in c.items() if k != "lines_px"}}
+                mid = ankle_midpoint(pose)
+                if mid:
+                    rec["ankle_px"] = [round(mid[0], 1), round(mid[1], 1)]
+                records.append(rec)
         except Exception:  # noqa: BLE001 - one stroke must not kill the sweep
             continue
     shutil.rmtree(workdir, ignore_errors=True)

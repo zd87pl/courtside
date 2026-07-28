@@ -25,6 +25,8 @@ Task: identify each visible stroke (ball contact) by either player and assess it
 
 Rules:
 - "near" = player closer to the camera, "far" = player on the other side of the net.
+- The first stroke a player hits immediately after the opponent's serve is a "return" -
+  label it "return", not forehand/backhand.
 - Only report strokes you can actually see. Do not guess strokes that happen off-camera
   or between frames. It is fine to report fewer strokes than actually occurred.
 - t_s must be the absolute time in the FULL video. Use the per-frame timestamps above:

@@ -140,6 +140,37 @@ def analyze_clip(vlm, clip_frames: ClipFrames, schema: dict, max_tokens: int,
     }
 
 
+def parse_ts(ts: str) -> float:
+    """'90', '1:30', or '1:02:03' -> seconds."""
+    parts = ts.strip().split(":")
+    if not 1 <= len(parts) <= 3 or not all(p.strip() for p in parts):
+        raise ValueError(f"bad time '{ts}' (use seconds, MM:SS, or HH:MM:SS)")
+    secs = 0.0
+    for p in parts:
+        secs = secs * 60 + float(p)
+    return secs
+
+
+def cut_portion(video: Path, from_s: float, to_s: float, out_dir: Path) -> Path:
+    """Fast stream-copy cut so a 5-minute test slice of a 3GB 4K file is cheap.
+
+    -ss before -i snaps to the previous keyframe (fine for analysis); no
+    re-encode means the cut takes seconds even on 4K sources.
+    """
+    import subprocess
+    if to_s <= from_s:
+        raise ValueError("--to-ts must be after --from-ts")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dest = out_dir / f"portion_{int(from_s)}s_{int(to_s)}s{video.suffix or '.mp4'}"
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+           "-ss", f"{from_s:.3f}", "-to", f"{to_s:.3f}", "-i", str(video),
+           "-c", "copy", "-avoid_negative_ts", "make_zero", str(dest)]
+    subprocess.run(cmd, check=True)
+    if not dest.exists() or dest.stat().st_size == 0:
+        raise RuntimeError("portion cut produced no output")
+    return dest
+
+
 def _model_is_cached(repo: str) -> bool:
     try:
         from huggingface_hub import snapshot_download
@@ -259,6 +290,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--heatmap", action="store_true",
                    help="EXPERIMENTAL: map flagged-moment positions onto a court diagram "
                         "(fixed camera + [pose] extra required)")
+    p.add_argument("--from-ts", default=None, metavar="TS",
+                   help="analyze only a portion: start time (seconds or MM:SS / HH:MM:SS)")
+    p.add_argument("--to-ts", default=None, metavar="TS",
+                   help="portion end time (with --from-ts); fast stream-copy cut, no re-encode")
     p.add_argument("--server-url", default=None, help="OpenAI-compatible base URL instead of local load "
                    "(e.g. https://openrouter.ai/api/v1)")
     p.add_argument("--server-model", default=None, help="model name for --server-url")
@@ -306,8 +341,17 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = args.out or video.with_name(video.stem + "_courtside")
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    portion_note = ""
+    if args.from_ts or args.to_ts:
+        if not (args.from_ts and args.to_ts):
+            p.error("--from-ts and --to-ts must be used together")
+        f_s, t_s = parse_ts(args.from_ts), parse_ts(args.to_ts)
+        _log(f"cutting portion {args.from_ts} - {args.to_ts} (stream copy, no re-encode) ...")
+        video = cut_portion(video, f_s, t_s, out_dir)
+        portion_note = f" (portion {args.from_ts}-{args.to_ts} of original)"
+
     duration = probe_duration(video)
-    _log(f"video: {video.name}  ({duration/60:.1f} min)")
+    _log(f"video: {video.name}  ({duration/60:.1f} min){portion_note}")
 
     # true end-to-end wall clock starts here (segmentation onward)
     pipeline_t0 = time.perf_counter()
@@ -480,6 +524,28 @@ def main(argv: list[str] | None = None) -> int:
             # the report prompt sees the measured strike-zone stats as facts
             facts["contact_quality"] = contact_quality["summary"]
 
+        # serve & return analysis: positions by court zone + return-height zones
+        serve_return: dict = {}
+        if contact_quality.get("strokes"):
+            try:
+                from .court import build_serve_return_map
+                flagged_ts = {s.t_s for a in analyses for s in a.strokes
+                              if s.technique_flags or s.tactical_flags}
+                anchor = out_dir / "court_anchor.jpg"
+                serve_return = build_serve_return_map(
+                    anchor if anchor.exists() else None,
+                    contact_quality["strokes"], flagged_ts,
+                    out_dir / "serve_return.json")
+                n_pos = len(serve_return.get("positions", []))
+                _log(f"  serve/return: {serve_return['counts']['serves']} serves, "
+                     f"{serve_return['counts']['returns']} returns"
+                     + (f", {n_pos} court positions mapped" if serve_return.get("court_detected")
+                        else " (court not detected - height zones only)"))
+                facts["serve_return"] = {"counts": serve_return["counts"],
+                                         "return_height": serve_return["return_height"]}
+            except Exception as e:  # noqa: BLE001 - never fatal
+                _log(f"  serve/return analysis failed ({type(e).__name__}) - skipped")
+
         t_report = time.perf_counter()
         markdown = _generate_markdown(vlm, analyses, facts, res_s)
         report_s = time.perf_counter() - t_report
@@ -507,6 +573,8 @@ def main(argv: list[str] | None = None) -> int:
             session_doc["moments"] = moments
         if contact_quality:
             session_doc["contact_quality"] = contact_quality
+        if serve_return:
+            session_doc["serve_return"] = serve_return
             if args.heatmap:
                 try:
                     from .court import build_courtmap

@@ -662,6 +662,10 @@ def render_session(ref) -> str:
     if cq.get("strokes_measured"):
         parts.append(_contact_quality_panel(cq))
 
+    sr = _dget(doc, "serve_return") or {}
+    if _dget(sr, "counts"):
+        parts.append(_serve_return_panel(sr))
+
     def img_url(fp: Path) -> str | None:
         try:
             rel = fp.relative_to(sdir)
@@ -769,6 +773,120 @@ def _contact_quality_panel(cq: dict) -> str:
   {"".join(rows)}
   <div class="legend">{legend}</div>
 </div>"""
+
+
+def _court_svg_base(W: float, L: float, S: int, M: int) -> tuple[list[str], int, int]:
+    """Shared portrait court drawing (outline, singles lines, service boxes, net)."""
+    vw, vh = int(W * S + 2 * M), int(L * S + 2 * M)
+    def X(x: float) -> float: return M + x * S
+    def Y(y: float) -> float: return M + y * S
+    sngl = (W - 8.23) / 2
+    svl = 5.485
+    net_y = L / 2
+    s = [f'<svg viewBox="0 0 {vw} {vh}" width="250" style="max-width:100%" role="img" aria-label="court">']
+    s.append(f'<rect x="{X(0)}" y="{Y(0)}" width="{W*S}" height="{L*S}" fill="var(--accent-wash)" '
+             f'stroke="var(--ink-2)" stroke-width="1.5" rx="2"/>')
+    for x0, x1, y0, y1 in ((sngl, sngl, 0, L), (W - sngl, W - sngl, 0, L),
+                           (sngl, W - sngl, net_y - svl, net_y - svl),
+                           (sngl, W - sngl, net_y + svl, net_y + svl),
+                           (W / 2, W / 2, net_y - svl, net_y + svl)):
+        s.append(f'<line x1="{X(x0)}" y1="{Y(y0)}" x2="{X(x1)}" y2="{Y(y1)}" '
+                 f'stroke="var(--ink-2)" stroke-width="1" opacity="0.6"/>')
+    s.append(f'<line x1="{X(0)-6}" y1="{Y(net_y)}" x2="{X(W)+6}" y2="{Y(net_y)}" '
+             f'stroke="var(--ink)" stroke-width="2.5"/>')
+    return s, S, M
+
+
+def _serve_return_panel(sr: dict) -> str:
+    """Serves & returns: court position heatmap + return-height zone distribution."""
+    counts = _dget(sr, "counts") or {}
+    positions = [p for p in (_dget(sr, "positions") or []) if isinstance(p, dict)]
+    rh = _dget(sr, "return_height") or {}
+
+    W, L = 10.97, 23.77
+    S, M = 12, 30
+    court = ""
+    if positions:
+        s, _, _ = _court_svg_base(W, L, S, M)
+        def X(x: float) -> float: return M + x * S
+        def Y(y: float) -> float: return M + y * S
+        for p in positions:
+            x, y = X(_num(p.get("x_m"))), Y(_num(p.get("y_m")))
+            color = _CQ_COLORS.get(str(p.get("quality", "acceptable")), "var(--warn)")
+            tip = (f"<span class='h'>{_e(p.get('stroke', ''))}</span> ({_e(p.get('player', ''))}) "
+                   f"&middot; {_e(str(p.get('zone', '')).replace('_', ' '))} &middot; t={_num(p.get('t_s')):.1f}s"
+                   + (" &middot; flagged" if p.get("flagged") else ""))
+            if p.get("stroke") == "serve":
+                s.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="7" fill="{color}" '
+                         f'stroke="var(--surface)" stroke-width="2" data-tip="{_e(tip)}"/>')
+            else:  # return: ring marker
+                s.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="7" fill="none" stroke="{color}" '
+                         f'stroke-width="3" data-tip="{_e(tip)}"/>')
+            if p.get("flagged"):
+                s.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="11" fill="none" '
+                         f'stroke="var(--crit)" stroke-width="1.4" opacity="0.8"/>')
+        s.append("</svg>")
+        court = f'<div style="flex:0 0 auto">{"".join(s)}</div>'
+
+    # zone table: worst zones first (by poor+flagged density)
+    zsum = _dget(sr, "zones_summary") or {}
+    rows: list[str] = []
+    def badness(v: dict) -> float:
+        c = max(1, int(_num(v.get("count"))))
+        return (_num(v.get("poor")) + _num(v.get("flagged"))) / c
+    for key, v in sorted(zsum.items(), key=lambda kv: -badness(kv[1]))[:8]:
+        if not isinstance(v, dict):
+            continue
+        stroke, zone = (key.split(":", 1) + [""])[:2]
+        c, poor, fl = int(_num(v.get("count"))), int(_num(v.get("poor"))), int(_num(v.get("flagged")))
+        warn = ' style="color:var(--crit)"' if (poor + fl) > 0 else ""
+        rows.append(f'<div style="display:flex;gap:10px;font-size:12.5px;padding:4px 0;'
+                    f'border-bottom:1px solid var(--border-2)">'
+                    f'<span style="width:56px;color:var(--ink-2)">{_e(stroke)}</span>'
+                    f'<span style="flex:1">{_e(zone.replace("_", " "))}</span>'
+                    f'<span class="tnum">{c}&times;</span>'
+                    f'<span class="tnum"{warn}>{poor} poor &middot; {fl} flagged</span></div>')
+
+    # return-height distribution
+    zones_order = ["below_knee", "knee_to_hip", "hip_to_chest", "chest_to_shoulder",
+                   "shoulder_to_head", "above_head"]
+    hz = _dget(rh, "zones") or {}
+    total_h = sum(_num(v) for v in hz.values()) or 0
+    hbars = ""
+    if total_h:
+        segs = []
+        for z in zones_order:
+            n = int(_num(hz.get(z)))
+            if n:
+                q = "ideal" if z == "hip_to_chest" else ("poor" if z in ("below_knee", "above_head") else "acceptable")
+                segs.append(f'<div data-tip="{_e(z.replace("_", " "))}: {n}" '
+                            f'style="width:{100 * n / total_h:.1f}%;background:{_CQ_COLORS[q]}"></div>')
+        hq = _dget(rh, "quality") or {}
+        hbars = (f'<div class="kicker" style="margin:14px 0 8px">Return-of-serve contact height</div>'
+                 f'<div style="display:flex;height:14px;border-radius:7px;overflow:hidden;'
+                 f'border:1px solid var(--border-2)">{"".join(segs)}</div>'
+                 f'<div class="legend" style="margin-top:6px">'
+                 f'<span>{int(_num(hq.get("ideal")))} ideal</span>'
+                 f'<span>{int(_num(hq.get("acceptable")))} acceptable</span>'
+                 f'<span style="color:var(--crit)">{int(_num(hq.get("poor")))} poor</span></div>')
+
+    note = ("Player position at contact (fixed-camera homography). Serve landing placement "
+            "is not claimed - that needs ball tracking (production roadmap).")
+    legend = ('<div class="legend" style="margin-top:8px">'
+              '<span><span class="sw" style="background:var(--good)"></span>serve (dot) / return (ring), colored by contact quality</span>'
+              '<span><span class="sw" style="border:1.5px solid var(--crit);background:transparent"></span>flagged stroke</span></div>')
+    body = (f'<div style="display:flex;gap:22px;flex-wrap:wrap">{court}'
+            f'<div style="flex:1;min-width:260px">'
+            f'<div style="display:flex;gap:18px;margin-bottom:8px">'
+            f'<span class="stat" style="margin:0"><b class="tnum" style="font-size:24px;display:block">'
+            f'{int(_num(_dget(counts, "serves")))}</b><span style="font-size:12px;color:var(--ink-2)">serves</span></span>'
+            f'<span class="stat" style="margin:0"><b class="tnum" style="font-size:24px;display:block">'
+            f'{int(_num(_dget(counts, "returns")))}</b><span style="font-size:12px;color:var(--ink-2)">returns</span></span></div>'
+            + ("".join(rows) if rows else
+               ('' if positions else '<p class="hint">Court not detected in this footage - showing height zones only.</p>'))
+            + hbars + "</div></div>")
+    return (f'<div class="card"><h2>Serves &amp; returns &mdash; where and how high</h2>'
+            f'<p class="hint">{note}</p>{body}{legend if positions else ""}</div>')
 
 
 def _court_panel(cm: dict) -> str:
