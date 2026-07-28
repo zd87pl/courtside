@@ -663,7 +663,8 @@ def render_session(ref) -> str:
         parts.append(_contact_quality_panel(cq))
 
     sr = _dget(doc, "serve_return") or {}
-    if _dget(sr, "counts"):
+    sr_counts = _dget(sr, "counts") or {}
+    if isinstance(sr_counts, dict) and any(_num(v) for v in sr_counts.values()):
         parts.append(_serve_return_panel(sr))
 
     def img_url(fp: Path) -> str | None:
@@ -781,7 +782,7 @@ def _court_svg_base(W: float, L: float, S: int, M: int) -> tuple[list[str], int,
     def X(x: float) -> float: return M + x * S
     def Y(y: float) -> float: return M + y * S
     sngl = (W - 8.23) / 2
-    svl = 5.485
+    svl = 6.40  # service line is 6.40m from the net
     net_y = L / 2
     s = [f'<svg viewBox="0 0 {vw} {vh}" width="250" style="max-width:100%" role="img" aria-label="court">']
     s.append(f'<rect x="{X(0)}" y="{Y(0)}" width="{W*S}" height="{L*S}" fill="var(--accent-wash)" '
@@ -811,6 +812,8 @@ def _serve_return_panel(sr: dict) -> str:
         def X(x: float) -> float: return M + x * S
         def Y(y: float) -> float: return M + y * S
         for p in positions:
+            if not isinstance(p.get("x_m"), (int, float)) or not isinstance(p.get("y_m"), (int, float)):
+                continue  # missing coords would otherwise plot at the (0,0) corner
             x, y = X(_num(p.get("x_m"))), Y(_num(p.get("y_m")))
             color = _CQ_COLORS.get(str(p.get("quality", "acceptable")), "var(--warn)")
             tip = (f"<span class='h'>{_e(p.get('stroke', ''))}</span> ({_e(p.get('player', ''))}) "
@@ -834,9 +837,8 @@ def _serve_return_panel(sr: dict) -> str:
     def badness(v: dict) -> float:
         c = max(1, int(_num(v.get("count"))))
         return (_num(v.get("poor")) + _num(v.get("flagged"))) / c
-    for key, v in sorted(zsum.items(), key=lambda kv: -badness(kv[1]))[:8]:
-        if not isinstance(v, dict):
-            continue
+    zitems = [(k, v) for k, v in zsum.items() if isinstance(v, dict)]
+    for key, v in sorted(zitems, key=lambda kv: -badness(kv[1]))[:8]:
         stroke, zone = (key.split(":", 1) + [""])[:2]
         c, poor, fl = int(_num(v.get("count"))), int(_num(v.get("poor"))), int(_num(v.get("flagged")))
         warn = ' style="color:var(--crit)"' if (poor + fl) > 0 else ""
@@ -900,7 +902,7 @@ def _court_panel(cm: dict) -> str:
     def Y(y): return M + y * S
 
     sngl = (W - 8.23) / 2  # singles sideline inset
-    svl = 5.485            # service line distance from net
+    svl = 6.40             # service line distance from net
     net_y = L / 2
     s = [f'<svg viewBox="0 0 {vw} {vh}" width="240" style="max-width:100%" role="img" aria-label="court map">']
     s.append(f'<rect x="{X(0)}" y="{Y(0)}" width="{W*S}" height="{L*S}" fill="var(--accent-wash)" '
@@ -915,6 +917,8 @@ def _court_panel(cm: dict) -> str:
              f'stroke="var(--ink)" stroke-width="2.5"/>')
     for p in cm.get("positions", []):
         if not isinstance(p, dict):
+            continue
+        if not isinstance(p.get("x_m"), (int, float)) or not isinstance(p.get("y_m"), (int, float)):
             continue
         color = SEV.get(str(p.get("severity", "low")), SEV["low"])[0]
         tip = f"<span class='h'>{_e(p.get('code', ''))}</span> ({_e(p.get('player', ''))}) &middot; t={_num(p.get('t_s')):.1f}s"

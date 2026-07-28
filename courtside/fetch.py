@@ -73,23 +73,36 @@ def fetch_gdrive(file_id: str, dest_dir: Path,
         name = re.sub(r"[^\w.\- ]+", "_", m.group(1)) if m else f"gdrive_{file_id}.mp4"
         total = int(resp.headers.get("Content-Length") or 0)
         final = dest_dir / name
+        # stream to a .part temp so an interrupted download never leaves a
+        # plausible-looking truncated video behind for analysis to pick up
+        part = dest_dir / (name + f".{uuid.uuid4().hex[:8]}.part")
         done = 0
         last_pct = -5
-        with open(final, "wb") as f:
-            while True:
-                chunk = resp.read(1 << 20)
-                if not chunk:
-                    break
-                f.write(chunk)
-                done += len(chunk)
-                if total and on_line:
-                    pct = int(100 * done / total)
-                    if pct >= last_pct + 5:
-                        last_pct = pct
-                        on_line(f"[gdrive] {pct}% of {total / (1 << 30):.2f}GiB")
-    if final.stat().st_size == 0:
-        final.unlink(missing_ok=True)
+        try:
+            with open(part, "wb") as f:
+                while True:
+                    chunk = resp.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    if total and on_line:
+                        pct = int(100 * done / total)
+                        if pct >= last_pct + 5:
+                            last_pct = pct
+                            on_line(f"[gdrive] {pct}% of {total / (1 << 30):.2f}GiB")
+        except BaseException:
+            part.unlink(missing_ok=True)
+            raise
+    if done == 0:
+        part.unlink(missing_ok=True)
         raise RuntimeError("Google Drive download produced an empty file")
+    if total and done != total:
+        part.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Google Drive download incomplete ({done} of {total} bytes) - retry"
+        )
+    part.replace(final)
     if on_line:
         on_line(f"[gdrive] done: {final.name}")
     return final

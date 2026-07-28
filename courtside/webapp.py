@@ -26,7 +26,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import config
-from .fetch import is_url, video_slug, ytdlp_available
+from .fetch import gdrive_id, is_url, video_slug, ytdlp_available
 from .webui import render_dashboard, render_run_page, render_session
 
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv"}
@@ -336,7 +336,8 @@ def build_analysis_request(form: dict[str, str], roots: list[Path]) -> tuple[lis
     if is_url(video):
         if form.get("offline"):
             raise ValueError("Offline mode can't download a URL - clear one or the other.")
-        if not ytdlp_available():
+        # Google Drive links download directly (stdlib) - no yt-dlp required
+        if gdrive_id(video) is None and not ytdlp_available():
             raise ValueError("URL input needs yt-dlp: pip install 'courtside[youtube]' and restart.")
         workspace = roots[0] if roots else Path.cwd()
         out_dir = workspace / f"yt_{video_slug(video)}_courtside"

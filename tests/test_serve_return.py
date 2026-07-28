@@ -20,6 +20,23 @@ def test_parse_ts_forms():
         parse_ts("::")
 
 
+def test_parse_ts_rejects_bad_parts():
+    with pytest.raises(ValueError):
+        parse_ts("-5")
+    with pytest.raises(ValueError):
+        parse_ts("1:-30")
+    with pytest.raises(ValueError):
+        parse_ts("1:90")  # seconds must be < 60 when minutes are given
+    with pytest.raises(ValueError):
+        parse_ts("1:90:00")
+    with pytest.raises(ValueError):
+        parse_ts("nan")
+    with pytest.raises(ValueError):
+        parse_ts("inf")
+    with pytest.raises(ValueError):
+        parse_ts("abc")
+
+
 def test_gdrive_id_shapes():
     assert gdrive_id("https://drive.google.com/file/d/1AbC_dEf-234567890/view?usp=sharing") == "1AbC_dEf-234567890"
     assert gdrive_id("https://drive.google.com/open?id=1AbC_dEf-234567890") == "1AbC_dEf-234567890"
@@ -40,6 +57,17 @@ def test_position_zones_near_and_far():
     # midcourt
     z4 = position_zone(COURT_W / 2, COURT_L / 2 + 4.0)
     assert z4["depth"] == "midcourt"
+
+
+def test_position_zone_service_line_band():
+    # the service line is 6.40m from the net (NOT 5.485m, which is the
+    # baseline-to-service-line gap): 6.0m from the net is still midcourt,
+    # 7.0m is inside the baseline zone
+    assert position_zone(COURT_W / 2, COURT_L / 2 + 6.0)["depth"] == "midcourt"
+    assert position_zone(COURT_W / 2, COURT_L / 2 + 7.0)["depth"] == "baseline"
+    # mirrored on the far side
+    assert position_zone(COURT_W / 2, COURT_L / 2 - 6.0)["depth"] == "midcourt"
+    assert position_zone(COURT_W / 2, COURT_L / 2 - 7.0)["depth"] == "baseline"
 
 
 def _rec(t, stroke, player, zone="hip_to_chest", quality="ideal", ankle=None):

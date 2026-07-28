@@ -78,7 +78,7 @@ def position_zone(x_m: float, y_m: float) -> dict[str, str]:
     dist_from_net = abs(y_m - COURT_L / 2)
     if depth_from_baseline > 0.5:
         depth = "behind_baseline"
-    elif dist_from_net > 5.485:  # behind the service line
+    elif dist_from_net > 6.40:  # behind the service line (6.40m from the net)
         depth = "baseline"
     elif dist_from_net > 2.5:
         depth = "midcourt"

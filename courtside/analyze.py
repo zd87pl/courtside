@@ -142,12 +142,21 @@ def analyze_clip(vlm, clip_frames: ClipFrames, schema: dict, max_tokens: int,
 
 def parse_ts(ts: str) -> float:
     """'90', '1:30', or '1:02:03' -> seconds."""
+    import math
     parts = ts.strip().split(":")
     if not 1 <= len(parts) <= 3 or not all(p.strip() for p in parts):
         raise ValueError(f"bad time '{ts}' (use seconds, MM:SS, or HH:MM:SS)")
     secs = 0.0
-    for p in parts:
-        secs = secs * 60 + float(p)
+    for i, p in enumerate(parts):
+        try:
+            v = float(p)
+        except ValueError:
+            raise ValueError(f"bad time '{ts}' (use seconds, MM:SS, or HH:MM:SS)") from None
+        if not math.isfinite(v) or v < 0:
+            raise ValueError(f"bad time '{ts}' (parts must be non-negative numbers)")
+        if i > 0 and v >= 60:
+            raise ValueError(f"bad time '{ts}' (minutes/seconds must be < 60)")
+        secs = secs * 60 + v
     return secs
 
 
@@ -160,12 +169,22 @@ def cut_portion(video: Path, from_s: float, to_s: float, out_dir: Path) -> Path:
     import subprocess
     if to_s <= from_s:
         raise ValueError("--to-ts must be after --from-ts")
+    src_dur = probe_duration(video)
+    if src_dur and from_s >= src_dur:
+        raise ValueError(
+            f"--from-ts ({from_s:.0f}s) is at or past the end of the video "
+            f"({src_dur:.0f}s)")
+    if src_dur and to_s > src_dur:
+        to_s = src_dur
     out_dir.mkdir(parents=True, exist_ok=True)
     dest = out_dir / f"portion_{int(from_s)}s_{int(to_s)}s{video.suffix or '.mp4'}"
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
            "-ss", f"{from_s:.3f}", "-to", f"{to_s:.3f}", "-i", str(video),
            "-c", "copy", "-avoid_negative_ts", "make_zero", str(dest)]
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"portion cut failed (ffmpeg exit {e.returncode})") from e
     if not dest.exists() or dest.stat().st_size == 0:
         raise RuntimeError("portion cut produced no output")
     return dest
@@ -345,9 +364,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.from_ts or args.to_ts:
         if not (args.from_ts and args.to_ts):
             p.error("--from-ts and --to-ts must be used together")
-        f_s, t_s = parse_ts(args.from_ts), parse_ts(args.to_ts)
+        try:
+            f_s, t_s = parse_ts(args.from_ts), parse_ts(args.to_ts)
+        except ValueError as e:
+            p.error(str(e))
         _log(f"cutting portion {args.from_ts} - {args.to_ts} (stream copy, no re-encode) ...")
-        video = cut_portion(video, f_s, t_s, out_dir)
+        try:
+            video = cut_portion(video, f_s, t_s, out_dir)
+        except (ValueError, RuntimeError) as e:
+            p.error(str(e))
         portion_note = f" (portion {args.from_ts}-{args.to_ts} of original)"
 
     duration = probe_duration(video)
@@ -536,13 +561,17 @@ def main(argv: list[str] | None = None) -> int:
                     anchor if anchor.exists() else None,
                     contact_quality["strokes"], flagged_ts,
                     out_dir / "serve_return.json")
-                n_pos = len(serve_return.get("positions", []))
-                _log(f"  serve/return: {serve_return['counts']['serves']} serves, "
-                     f"{serve_return['counts']['returns']} returns"
-                     + (f", {n_pos} court positions mapped" if serve_return.get("court_detected")
-                        else " (court not detected - height zones only)"))
-                facts["serve_return"] = {"counts": serve_return["counts"],
-                                         "return_height": serve_return["return_height"]}
+                if not any(serve_return["counts"].values()):
+                    _log("  serve/return: none detected in this footage - skipped")
+                    serve_return = {}
+                else:
+                    n_pos = len(serve_return.get("positions", []))
+                    _log(f"  serve/return: {serve_return['counts']['serves']} serves, "
+                         f"{serve_return['counts']['returns']} returns"
+                         + (f", {n_pos} court positions mapped" if serve_return.get("court_detected")
+                            else " (court not detected - height zones only)"))
+                    facts["serve_return"] = {"counts": serve_return["counts"],
+                                             "return_height": serve_return["return_height"]}
             except Exception as e:  # noqa: BLE001 - never fatal
                 _log(f"  serve/return analysis failed ({type(e).__name__}) - skipped")
 
@@ -575,20 +604,20 @@ def main(argv: list[str] | None = None) -> int:
             session_doc["contact_quality"] = contact_quality
         if serve_return:
             session_doc["serve_return"] = serve_return
-            if args.heatmap:
-                try:
-                    from .court import build_courtmap
-                    anchored = [m for m in moments if m.get("contact_frame") and m.get("contact_px")]
-                    if anchored:
-                        cm = build_courtmap(
-                            out_dir / anchored[0]["contact_frame"],
-                            [{"t_s": m["t_s"], "player": m["player"], "code": m["code"],
-                              "severity": m["severity"], "xy": m["contact_px"]} for m in anchored],
-                            out_dir / "courtmap.json")
-                        _log("  court map: " + (f"{len(cm['positions'])} positions mapped"
-                                                if cm else "court not detected - skipped"))
-                except Exception as e:  # noqa: BLE001 - experimental, never fatal
-                    _log(f"  court map failed ({type(e).__name__}) - skipped")
+        if args.heatmap:
+            try:
+                from .court import build_courtmap
+                anchored = [m for m in moments if m.get("contact_frame") and m.get("contact_px")]
+                if anchored:
+                    cm = build_courtmap(
+                        out_dir / anchored[0]["contact_frame"],
+                        [{"t_s": m["t_s"], "player": m["player"], "code": m["code"],
+                          "severity": m["severity"], "xy": m["contact_px"]} for m in anchored],
+                        out_dir / "courtmap.json")
+                    _log("  court map: " + (f"{len(cm['positions'])} positions mapped"
+                                            if cm else "court not detected - skipped"))
+            except Exception as e:  # noqa: BLE001 - experimental, never fatal
+                _log(f"  court map failed ({type(e).__name__}) - skipped")
         _finalize_reports(out_dir, session_doc, markdown)
         _log("\n" + report.cost_summary_line(run_stats))
     finally:
