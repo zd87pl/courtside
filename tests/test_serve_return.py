@@ -47,7 +47,9 @@ def test_gdrive_id_shapes():
 def test_position_zones_near_and_far():
     # near player standing 1m behind their baseline, on their left third
     z = position_zone(1.5, COURT_L + 1.0)
-    assert z == {"half": "near", "depth": "behind_baseline", "lateral": "left", "zone": "behind_baseline_left"}
+    assert {k: z[k] for k in ("half", "depth", "lateral", "zone")} == {
+        "half": "near", "depth": "behind_baseline", "lateral": "left",
+        "zone": "behind_baseline_left"}
     # far player same spot on THEIR side: mirrored, still 'left' for them
     z2 = position_zone(COURT_W - 1.5, -1.0)
     assert z2["half"] == "far" and z2["zone"] == "behind_baseline_left"

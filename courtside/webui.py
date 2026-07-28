@@ -390,6 +390,106 @@ def _fmt_min(seconds: float) -> str:
 
 # ---------------- dashboard ----------------
 
+def _sparkline(values: list, w: int = 200, h: int = 44, suffix: str = "") -> str:
+    """SVG sparkline; None entries (sessions without that metric) leave gaps."""
+    pts = [(i, _num(v)) for i, v in enumerate(values) if v is not None]
+    if len(pts) < 2:
+        return ""
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    lo, hi = min(ys), max(ys)
+    span = (hi - lo) or 1.0
+    pad = 5
+
+    def X(i: float) -> float:
+        return pad + (w - 2 * pad) * (i - xs[0]) / max(1, xs[-1] - xs[0])
+
+    def Y(v: float) -> float:
+        return h - pad - (h - 2 * pad) * (v - lo) / span
+
+    poly = " ".join(f"{X(i):.1f},{Y(v):.1f}" for i, v in pts)
+    lx, lv = pts[-1]
+    label = f"{lv:.0f}" if lv == int(lv) or abs(lv) >= 10 else f"{lv:.1f}"
+    return (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" aria-label="trend">'
+            f'<polyline points="{poly}" fill="none" stroke="var(--accent)" stroke-width="2"/>'
+            f'<circle cx="{X(lx):.1f}" cy="{Y(lv):.1f}" r="3" fill="var(--accent)"/></svg>'
+            f'<b class="tnum" style="font-size:13px">{label}{suffix}</b>')
+
+
+def _trends_panel(real: list) -> str:
+    """Cross-session trends: the 'is the player improving?' card."""
+    refs = sorted(real, key=lambda r: str(_dget(r.doc, "created_at") or ""))
+    if len(refs) < 2:
+        return ""
+    ideal: list = []
+    err_rate: list = []
+    fps_: list = []
+    tech_counters: list[dict] = []
+    for r in refs:
+        f = _dget(r.doc, "facts") or {}
+        cq = _dget(f, "contact_quality") or {}
+        ideal.append(_num(cq.get("pct_ideal")) if isinstance(cq, dict) and cq.get("pct_ideal") is not None else None)
+        oc = _dget(f, "outcomes") or {}
+        err_rate.append(_num(oc.get("error_rate_pct"))
+                        if isinstance(oc, dict) and oc.get("error_rate_pct") is not None else None)
+        total = _num(_dget(f, "total_strokes"))
+        nf = 0.0
+        merged: dict[str, float] = {}
+        for key in ("top_technique_flags", "top_tactical_flags"):
+            counts = _dget(f, key) or {}
+            if isinstance(counts, dict):
+                for k, v in counts.items():
+                    merged[k] = merged.get(k, 0) + _num(v)
+                    nf += _num(v)
+        tech_counters.append(merged)
+        fps_.append(round(nf / total, 2) if total else None)
+
+    rows: list[str] = []
+    for label, vals, suffix, better in (
+            ("ideal contact", ideal, "%", "higher"),
+            ("error rate (AI-called)", err_rate, "%", "lower"),
+            ("flags per stroke", fps_, "", "lower")):
+        spark = _sparkline(vals, suffix=suffix)
+        if not spark:
+            continue
+        rows.append(f'<div style="display:flex;gap:14px;align-items:center;padding:6px 0;'
+                    f'border-bottom:1px solid var(--border-2)">'
+                    f'<span style="flex:0 0 190px;font-size:13px">{_e(label)}'
+                    f'<span class="muted" style="display:block;font-size:11px">{better} is better</span></span>'
+                    f'<span style="display:flex;gap:10px;align-items:center">{spark}</span></div>')
+
+    # top recurring flags across sessions, with direction vs the earlier mean
+    totals: dict[str, float] = {}
+    for c in tech_counters:
+        for k, v in c.items():
+            totals[k] = totals.get(k, 0) + v
+    flag_rows: list[str] = []
+    for code, _tot in sorted(totals.items(), key=lambda kv: -kv[1])[:3]:
+        series = [c.get(code, 0) for c in tech_counters]
+        prior = series[:-1]
+        mean_prior = sum(prior) / len(prior) if prior else 0
+        arrow = ("&darr;" if series[-1] < mean_prior else
+                 ("&uarr;" if series[-1] > mean_prior else "&rarr;"))
+        good = series[-1] <= mean_prior
+        cells = "".join(f'<span class="tnum" style="width:26px;text-align:center">{int(n)}</span>'
+                        for n in series[-8:])
+        flag_rows.append(f'<div style="display:flex;gap:8px;align-items:center;font-size:12.5px;'
+                         f'padding:4px 0;border-bottom:1px solid var(--border-2)">'
+                         f'<span style="flex:1">{_e(code.replace("_", " "))}</span>{cells}'
+                         f'<span style="width:20px;text-align:center;'
+                         f'color:{"var(--good)" if good else "var(--crit)"}">{arrow}</span></div>')
+
+    if not rows and not flag_rows:
+        return ""
+    flags_block = (f'<div style="flex:1;min-width:260px"><div class="kicker" style="margin:0 0 6px">'
+                   f'Most recurrent flags (per session, oldest &rarr; newest)</div>{"".join(flag_rows)}</div>'
+                   if flag_rows else "")
+    return (f'<div class="card"><h2>Trends &mdash; last {len(refs)} sessions</h2>'
+            f'<p class="hint">Session-over-session movement. Sessions analyzed before outcome '
+            f'tracking show gaps.</p><div style="display:flex;gap:26px;flex-wrap:wrap">'
+            f'<div style="flex:1;min-width:300px">{"".join(rows)}</div>{flags_block}</div></div>')
+
+
 def render_dashboard(state, error: str | None = None) -> str:
     sessions = sorted(state.sessions(max_age_s=0).values(),
                       key=lambda r: str(_dget(r.doc, "created_at") or ""), reverse=True)
@@ -453,6 +553,11 @@ def render_dashboard(state, error: str | None = None) -> str:
   <div class="tile"><b class="tnum">{n_strokes}</b><span>strokes read</span></div>
   <div class="tile"><b class="tnum">{n_flags}</b><span>coaching flags</span></div>
 </div>""")
+
+    if len(real) >= 2:
+        trends = _trends_panel(real)
+        if trends:
+            parts.append(trends)
 
     # new analysis
     vid_opts = "".join(f'<option value="{_e(v)}">{_e(Path(v).name)}</option>' for v in videos)
@@ -596,6 +701,9 @@ def _timeline(sid: str, doc: dict, activity: dict | None) -> str:
             gap = min((abs(tx - xs[k]) for k in range(len(xs)) if k != j), default=24.0)
             half = max(2.0, min(6.0, gap / 2 - 0.5))
             tip = f"<span class='h'>{_e(st.get('stroke', '?'))}</span> ({_e(st.get('player', '?'))}) &middot; t={_num(st.get('t_s')):.1f}s"
+            out = st.get("outcome")
+            if out in ("net", "out_long", "out_wide"):
+                tip += f" &middot; {_e({'net': 'net', 'out_long': 'long', 'out_wide': 'wide'}[out])}"
             if flags:
                 tip += "<br>" + "<br>".join(f"{_e(f.get('code', ''))} <span class='s'>({_e(f.get('severity', ''))})</span>" for f in flags[:4])
             s.append(f'<line x1="{tx:.1f}" y1="{pad+4}" x2="{tx:.1f}" y2="{plot_h-20}" stroke="{color}" stroke-width="2"/>')
@@ -646,10 +754,17 @@ def render_session(ref) -> str:
     rt = _dget(rs, "realtime_factor")
     peak = _dget(rs, "peak_gb")
     cloud = _dget(rs, "cloud_equiv_usd")
+    oc = _dget(facts, "outcomes") or {}
+    err_tile = ""
+    if _dget(oc, "decided"):
+        err_tile = (f'<div class="tile"><b class="tnum">{int(_num(_dget(oc, "errors")))}</b>'
+                    f'<span>errors (AI-called)</span>'
+                    f'<div class="sub">{int(_num(_dget(oc, "coverage_pct")))}% of strokes decided</div></div>')
     parts.append(f"""
 <div class="tiles">
   <div class="tile"><b class="tnum">{_e(_dget(facts, "total_strokes", 0))}</b><span>strokes</span></div>
   <div class="tile"><b class="tnum">{_e(_dget(facts, "clips_analyzed", 0))}</b><span>rallies</span></div>
+  {err_tile}
   <div class="tile"><b class="tnum">{_e(_dget(split, "near", 0))} / {_e(_dget(split, "far", 0))}</b><span>near / far</span></div>
   <div class="tile accent"><b class="tnum">{_e(rt) if rt else "&mdash;"}&times;</b><span>realtime</span><div class="sub">end-to-end</div></div>
   <div class="tile"><b class="tnum">${_e(cloud) if cloud is not None else "0.00"}</b><span>{"cloud-equiv" if _dget(doc, "on_device") else "cloud cost (est.)"}</span>{'<div class="sub">on-device: $0</div>' if _dget(doc, "on_device") else '<div class="sub">frames uploaded</div>'}</div>
@@ -666,6 +781,10 @@ def render_session(ref) -> str:
     sr_counts = _dget(sr, "counts") or {}
     if isinstance(sr_counts, dict) and any(_num(v) for v in sr_counts.values()):
         parts.append(_serve_return_panel(sr))
+
+    em = _dget(doc, "error_matrix") or {}
+    if _dget(em, "court_detected") and _dget(em, "players"):
+        parts.append(_error_matrix_panel(em))
 
     def img_url(fp: Path) -> str | None:
         try:
@@ -889,6 +1008,107 @@ def _serve_return_panel(sr: dict) -> str:
             + hbars + "</div></div>")
     return (f'<div class="card"><h2>Serves &amp; returns &mdash; where and how high</h2>'
             f'<p class="hint">{note}</p>{body}{legend if positions else ""}</div>')
+
+
+_LANE_LABELS = {"wide_left": "wide L", "left": "L", "center": "center",
+                "right": "R", "wide_right": "wide R"}
+_DEPTH_ROWS = ("net", "midcourt", "baseline", "behind_baseline")  # net at top
+_LANE_COLS = ("wide_left", "left", "center", "right", "wide_right")
+
+
+def _error_matrix_panel(em: dict) -> str:
+    """Depth x runway error matrix: the zone-grid heatmap, per player."""
+    players = _dget(em, "players") or {}
+    grids: list[str] = []
+    for player in ("near", "far"):
+        pdoc = players.get(player)
+        if not isinstance(pdoc, dict) or not pdoc.get("measured"):
+            continue
+        cells = pdoc.get("cells") or {}
+        max_err = max((int(_num(c.get("errors"))) for c in cells.values()
+                       if isinstance(c, dict)), default=0)
+        rows = ['<div style="display:grid;grid-template-columns:88px repeat(5,minmax(44px,1fr));'
+                'gap:3px;font-size:11.5px">']
+        rows.append('<div></div>' + "".join(
+            f'<div style="text-align:center;color:var(--muted);padding:2px 0">{_e(_LANE_LABELS[l])}</div>'
+            for l in _LANE_COLS))
+        for depth in _DEPTH_ROWS:
+            rows.append(f'<div style="color:var(--ink-2);align-self:center;text-align:right;'
+                        f'padding-right:8px">{_e(depth.replace("_", " "))}</div>')
+            for lane in _LANE_COLS:
+                c = cells.get(f"{depth}:{lane}")
+                if not isinstance(c, dict) or not c.get("measured"):
+                    rows.append('<div style="border:1px solid var(--border-2);border-radius:6px;'
+                                'aspect-ratio:1.5;display:flex;align-items:center;justify-content:center;'
+                                'color:var(--muted)">&middot;</div>')
+                    continue
+                errs, meas = int(_num(c.get("errors"))), int(_num(c.get("measured")))
+                if errs and max_err:
+                    pct = int(12 + 68 * errs / max_err)
+                    bg = f"color-mix(in srgb, var(--crit) {pct}%, transparent)"
+                else:
+                    bg = "var(--accent-wash)"
+                bits = [f"{c.get(k, 0)} {label}" for k, label in
+                        (("net", "net"), ("out_long", "long"), ("out_wide", "wide"),
+                         ("flagged", "flagged"), ("poor_contact", "poor contact"))
+                        if int(_num(c.get(k)))]
+                tip = f"<span class='h'>{depth.replace('_', ' ')} &middot; {_LANE_LABELS[lane]}</span>" \
+                      + (f"<br>{' &middot; '.join(bits)}" if bits else "<br>no errors")
+                rows.append(f'<div data-tip="{_e(tip)}" style="border:1px solid var(--border-2);'
+                            f'border-radius:6px;aspect-ratio:1.5;display:flex;flex-direction:column;'
+                            f'align-items:center;justify-content:center;background:{bg}">'
+                            f'<b class="tnum">{errs}</b>'
+                            f'<span style="font-size:10px;color:var(--ink-2)">/{meas}</span></div>')
+        rows.append("</div>")
+        grids.append(f'<div style="flex:1;min-width:300px"><div class="kicker" style="margin:0 0 6px">'
+                     f'{_e(player)} player &mdash; {int(_num(pdoc.get("errors")))} errors / '
+                     f'{int(_num(pdoc.get("measured")))} measured</div>{"".join(rows)}</div>')
+
+    # ranked worst cells
+    rows_w: list[str] = []
+    for w in (_dget(em, "worst_cells") or [])[:5]:
+        if not isinstance(w, dict):
+            continue
+        depth, lane = (str(w.get("cell", "")).split(":", 1) + [""])[:2]
+        rows_w.append(f'<div style="display:flex;gap:10px;font-size:12.5px;padding:4px 0;'
+                      f'border-bottom:1px solid var(--border-2)">'
+                      f'<span style="width:44px;color:var(--ink-2)">{_e(w.get("player", ""))}</span>'
+                      f'<span style="flex:1">{_e(depth.replace("_", " "))} &middot; {_e(_LANE_LABELS.get(lane, lane))}</span>'
+                      f'<span class="tnum" style="color:var(--crit)">{int(_num(w.get("errors")))} errors</span>'
+                      f'<span class="tnum">of {int(_num(w.get("measured")))}</span></div>')
+    worst = (f'<div style="flex:0 1 280px;min-width:240px"><div class="kicker" style="margin:0 0 6px">'
+             f'Worst cells</div>{"".join(rows_w)}</div>') if rows_w else ""
+
+    # dot layer: each error position on the court, colored by its primary cause
+    dots = ""
+    positions = [p for p in (_dget(em, "positions") or []) if isinstance(p, dict)]
+    if positions:
+        W, L = 10.97, 23.77
+        S, M = 12, 30
+        s, _, _ = _court_svg_base(W, L, S, M)
+        for p in positions:
+            if not isinstance(p.get("x_m"), (int, float)) or not isinstance(p.get("y_m"), (int, float)):
+                continue
+            causes = [c for c in (p.get("causes") or []) if isinstance(c, str)]
+            color = ("var(--crit)" if any(c in ("net", "out_long", "out_wide") for c in causes)
+                     else ("var(--warn)" if "flag" in causes else "var(--accent)"))
+            tip = (f"<span class='h'>{p.get('stroke', '')}</span> ({p.get('player', '')}) "
+                   f"&middot; t={_num(p.get('t_s')):.1f}s &middot; {', '.join(c.replace('_', ' ') for c in causes)}")
+            s.append(f'<circle cx="{M + _num(p.get("x_m")) * S:.1f}" cy="{M + _num(p.get("y_m")) * S:.1f}" '
+                     f'r="6" fill="{color}" stroke="var(--surface)" stroke-width="2" data-tip="{_e(tip)}"/>')
+        s.append("</svg>")
+        legend = ('<div class="legend" style="margin-top:6px">'
+                  '<span><span class="sw" style="background:var(--crit)"></span>ball out (AI-called)</span>'
+                  '<span><span class="sw" style="background:var(--warn)"></span>flagged form</span>'
+                  '<span><span class="sw" style="background:var(--accent)"></span>poor contact</span></div>')
+        dots = f'<div style="flex:0 0 auto">{"".join(s)}{legend}</div>'
+
+    note = ("Where the player stood when errors happened (fixed-camera homography). "
+            "Error = AI-called outcome (net/long/wide), a medium+ flag, or poor measured "
+            "contact. Far-half positions have lower lane precision.")
+    return (f'<div class="card"><h2>Error map &mdash; depth &times; runway</h2>'
+            f'<p class="hint">{note}</p>'
+            f'<div style="display:flex;gap:26px;flex-wrap:wrap">{dots}{"".join(grids)}{worst}</div></div>')
 
 
 def _court_panel(cm: dict) -> str:

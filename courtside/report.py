@@ -25,6 +25,9 @@ def compute_session_facts(analyses: list[ClipAnalysis]) -> dict[str, Any]:
     stroke_mix: Counter[str] = Counter()
     tech: Counter[str] = Counter()
     tact: Counter[str] = Counter()
+    outcomes: Counter[str] = Counter()
+    received: Counter[str] = Counter()
+    unforced = 0
     for a in analyses:
         for s in a.strokes:
             stroke_mix[s.stroke] += 1
@@ -32,7 +35,15 @@ def compute_session_facts(analyses: list[ClipAnalysis]) -> dict[str, Any]:
                 tech[normalize_flag_code(f.code)] += 1
             for f in s.tactical_flags:
                 tact[normalize_flag_code(f.code)] += 1
+            out = getattr(s, "outcome", "unknown")
+            rcv = getattr(s, "received", "unknown")
+            outcomes[out] += 1
+            received[rcv] += 1
+            if out in ("net", "out_long", "out_wide") and rcv in ("easy", "normal"):
+                unforced += 1
 
+    decided = sum(n for o, n in outcomes.items() if o != "unknown")
+    errors = sum(outcomes[o] for o in ("net", "out_long", "out_wide"))
     conf = Counter(a.confidence for a in analyses)
     return {
         "clips_analyzed": len(analyses),
@@ -42,6 +53,18 @@ def compute_session_facts(analyses: list[ClipAnalysis]) -> dict[str, Any]:
         "top_technique_flags": dict(tech.most_common(8)),
         "top_tactical_flags": dict(tact.most_common(8)),
         "confidence_distribution": dict(conf),
+        "outcomes": {
+            "counts": dict(outcomes.most_common()),
+            "decided": decided,
+            "errors": errors,
+            "error_rate_pct": round(100 * errors / decided) if decided else None,
+            "coverage_pct": round(100 * decided / total_strokes) if total_strokes else 0,
+            "unforced_proxy": unforced,
+            "note": ("outcomes are model judgments from sampled frames; coverage is "
+                     "partial by design. unforced_proxy = errors on easy/normal balls."),
+        },
+        "received": {"counts": dict(received.most_common()),
+                     "note": "model judgment of incoming-ball difficulty from visible cues"},
     }
 
 

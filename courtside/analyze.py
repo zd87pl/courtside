@@ -575,6 +575,40 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as e:  # noqa: BLE001 - never fatal
                 _log(f"  serve/return analysis failed ({type(e).__name__}) - skipped")
 
+        # depth x lane error matrix over all measured strokes
+        error_matrix: dict = {}
+        if contact_quality.get("strokes"):
+            try:
+                from .court import build_error_matrix
+
+                def _max_sev(s) -> str:
+                    rank = {"low": 1, "medium": 2, "high": 3}
+                    sevs = [f.severity for f in s.technique_flags + s.tactical_flags]
+                    return max(sevs, key=lambda v: rank.get(v, 0)) if sevs else ""
+
+                stroke_info = [{"t_s": s.t_s,
+                                "outcome": getattr(s, "outcome", "unknown"),
+                                "received": getattr(s, "received", "unknown"),
+                                "max_severity": _max_sev(s)}
+                               for a in analyses for s in a.strokes]
+                anchor = out_dir / "court_anchor.jpg"
+                error_matrix = build_error_matrix(
+                    anchor if anchor.exists() else None,
+                    contact_quality["strokes"], stroke_info,
+                    out_dir / "error_matrix.json")
+                if error_matrix.get("court_detected"):
+                    n_err = sum(p["errors"] for p in error_matrix["players"].values())
+                    n_meas = sum(p["measured"] for p in error_matrix["players"].values())
+                    _log(f"  error matrix: {n_err} errors across {n_meas} measured strokes")
+                    facts["error_matrix"] = {"worst_cells": error_matrix["worst_cells"][:3],
+                                             "errors": n_err, "measured": n_meas}
+                else:
+                    _log("  error matrix: court not detected - skipped")
+                    error_matrix = {}
+            except Exception as e:  # noqa: BLE001 - never fatal
+                _log(f"  error matrix failed ({type(e).__name__}) - skipped")
+                error_matrix = {}
+
         t_report = time.perf_counter()
         markdown = _generate_markdown(vlm, analyses, facts, res_s)
         report_s = time.perf_counter() - t_report
@@ -604,6 +638,8 @@ def main(argv: list[str] | None = None) -> int:
             session_doc["contact_quality"] = contact_quality
         if serve_return:
             session_doc["serve_return"] = serve_return
+        if error_matrix:
+            session_doc["error_matrix"] = error_matrix
         if args.heatmap:
             try:
                 from .court import build_courtmap

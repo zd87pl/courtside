@@ -19,6 +19,26 @@ import cv2
 import numpy as np
 
 COURT_W, COURT_L = 10.97, 23.77  # meters, doubles
+ALLEY_M = 1.37                   # doubles alley width each side
+SINGLES_W = COURT_W - 2 * ALLEY_M  # 8.23m
+LANES = ("wide_left", "left", "center", "right", "wide_right")
+DEPTHS = ("net", "midcourt", "baseline", "behind_baseline")
+
+
+def lane_for_x(x_m: float) -> str:
+    """5 runway lanes from the player's own perspective (x already mirrored for
+    the far player). Wide lanes are the doubles alleys and anything beyond;
+    the singles width splits into three equal ~2.74m lanes."""
+    third = SINGLES_W / 3
+    if x_m < ALLEY_M:
+        return "wide_left"
+    if x_m < ALLEY_M + third:
+        return "left"
+    if x_m < ALLEY_M + 2 * third:
+        return "center"
+    if x_m < COURT_W - ALLEY_M:
+        return "right"
+    return "wide_right"
 
 
 def detect_court_homography(frame_path: Path) -> np.ndarray | None:
@@ -88,7 +108,7 @@ def position_zone(x_m: float, y_m: float) -> dict[str, str]:
     third = COURT_W / 3
     lateral = "left" if x < third else ("right" if x > 2 * third else "center")
     return {"half": "near" if near else "far", "depth": depth, "lateral": lateral,
-            "zone": f"{depth}_{lateral}"}
+            "lane": lane_for_x(x), "zone": f"{depth}_{lateral}"}
 
 
 def build_serve_return_map(
@@ -161,6 +181,104 @@ def build_serve_return_map(
         doc["court_detected"] = True
     else:
         doc["court_detected"] = False
+
+    out_path.write_text(json.dumps(doc, indent=2))
+    return doc
+
+
+_BAD_OUTCOMES = ("net", "out_long", "out_wide")
+
+
+def build_error_matrix(
+    anchor_frame: Path | None,
+    records: list[dict[str, Any]],
+    stroke_info: list[dict[str, Any]],
+    out_path: Path,
+) -> dict[str, Any]:
+    """Depth x runway-lane error matrix over ALL measured strokes, per player.
+
+    records: the contact-quality sweep ({t_s, player, stroke, contact, ankle_px}).
+    stroke_info: per-stroke VLM data ({t_s, outcome, received, max_severity}),
+    matched to records by nearest timestamp within 0.35s.
+
+    A measured stroke counts as an error when any of these fired (each is also
+    counted separately per cell so the UI can show the breakdown):
+    - the VLM saw the ball go out (outcome in net/out_long/out_wide),
+    - it carries a medium+ flag,
+    - measured contact quality is "poor".
+    Cells are where the player STOOD at contact (fixed-camera homography) -
+    same honesty rule as the serve/return map.
+    """
+    doc: dict[str, Any] = {
+        "lanes": list(LANES), "depths": list(DEPTHS),
+        "players": {}, "worst_cells": [], "positions": [],
+        "note": ("cells are where the player STOOD at contact via fixed-camera "
+                 "homography; outcome/received are model judgments; flag and "
+                 "contact criteria are measured."),
+    }
+    H = detect_court_homography(anchor_frame) if anchor_frame and anchor_frame.exists() else None
+    if H is None:
+        doc["court_detected"] = False
+        out_path.write_text(json.dumps(doc, indent=2))
+        return doc
+    doc["court_detected"] = True
+
+    def info_for(t: float) -> dict[str, Any]:
+        best, best_dt = None, 0.35
+        for si in stroke_info:
+            dt = abs(float(si.get("t_s", -1e9)) - t)
+            if dt < best_dt:
+                best, best_dt = si, dt
+        return best or {}
+
+    sev_rank = {"low": 1, "medium": 2, "high": 3}
+    for r in records:
+        xy = r.get("ankle_px")
+        if not xy:
+            continue
+        court_xy = image_to_court(H, (float(xy[0]), float(xy[1])))
+        if court_xy is None:
+            continue
+        zone = position_zone(*court_xy)
+        cell = f'{zone["depth"]}:{zone["lane"]}'
+        si = info_for(float(r["t_s"]))
+        outcome = si.get("outcome", "unknown")
+        quality = (r.get("contact") or {}).get("quality", "acceptable")
+        causes: list[str] = []
+        if outcome in _BAD_OUTCOMES:
+            causes.append(outcome)
+        if sev_rank.get(si.get("max_severity") or "", 0) >= 2:
+            causes.append("flag")
+        if quality == "poor":
+            causes.append("poor_contact")
+
+        player = r.get("player", "unknown")
+        pdoc = doc["players"].setdefault(player, {"measured": 0, "errors": 0, "cells": {}})
+        c = pdoc["cells"].setdefault(cell, {"measured": 0, "errors": 0, "net": 0,
+                                            "out_long": 0, "out_wide": 0,
+                                            "flagged": 0, "poor_contact": 0})
+        pdoc["measured"] += 1
+        c["measured"] += 1
+        if causes:
+            pdoc["errors"] += 1
+            c["errors"] += 1
+            if outcome in _BAD_OUTCOMES:
+                c[outcome] += 1
+            if "flag" in causes:
+                c["flagged"] += 1
+            if "poor_contact" in causes:
+                c["poor_contact"] += 1
+            doc["positions"].append({
+                "t_s": r["t_s"], "player": player, "stroke": r.get("stroke"),
+                "x_m": court_xy[0], "y_m": court_xy[1], "cell": cell,
+                "causes": causes,
+            })
+
+    worst = [{"player": p, "cell": cell, "errors": c["errors"], "measured": c["measured"]}
+             for p, pdoc in doc["players"].items() for cell, c in pdoc["cells"].items()
+             if c["errors"]]
+    worst.sort(key=lambda w: (-w["errors"], w["measured"]))
+    doc["worst_cells"] = worst[:8]
 
     out_path.write_text(json.dumps(doc, indent=2))
     return doc

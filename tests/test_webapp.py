@@ -263,3 +263,56 @@ def test_md_renderer_joins_wrapped_lines():
     assert "<li>item one wraps here</li>" in out
     assert out.count("<ol>") == 1 and "<li>drill one success line</li>" in out
     assert "<li>drill two</li>" in out
+
+
+def test_error_matrix_panel_renders_and_legacy_docs_skip_it(tmp_path):
+    d = _make_session(tmp_path)
+    state = AppState([tmp_path])
+    ref = next(iter(state.sessions().values()))
+    legacy_page = render_session(ref)
+    assert "Error map" not in legacy_page  # legacy docs: no panel, no crash
+
+    doc = json.loads((d / "session.json").read_text())
+    doc["error_matrix"] = {
+        "court_detected": True,
+        "lanes": ["wide_left", "left", "center", "right", "wide_right"],
+        "depths": ["net", "midcourt", "baseline", "behind_baseline"],
+        "players": {"near": {"measured": 3, "errors": 2, "cells": {
+            "baseline:center": {"measured": 2, "errors": 2, "net": 1, "out_long": 0,
+                                "out_wide": 0, "flagged": 1, "poor_contact": 0},
+            "net:left": {"measured": 1, "errors": 0, "net": 0, "out_long": 0,
+                         "out_wide": 0, "flagged": 0, "poor_contact": 0}}}},
+        "worst_cells": [{"player": "near", "cell": "baseline:center",
+                         "errors": 2, "measured": 2}],
+        "positions": [{"t_s": 11.0, "player": "near", "stroke": "forehand",
+                       "x_m": 5.0, "y_m": 22.0, "cell": "baseline:center",
+                       "causes": ["net", "flag"]}],
+    }
+    doc["facts"]["outcomes"] = {"counts": {"net": 1, "in_play": 1}, "decided": 2,
+                                "errors": 1, "error_rate_pct": 50, "coverage_pct": 100,
+                                "unforced_proxy": 1, "note": "n"}
+    (d / "session.json").write_text(json.dumps(doc))
+    state = AppState([tmp_path])
+    ref = next(iter(state.sessions().values()))
+    page = render_session(ref)
+    assert "Error map" in page and "baseline" in page
+    assert "errors (AI-called)" in page  # tile from facts.outcomes
+    assert "Worst cells" in page
+
+
+def test_trends_panel_needs_two_real_sessions(tmp_path):
+    _make_session(tmp_path, name="a_courtside", video="a.mp4")
+    state = AppState([tmp_path])
+    assert "Trends" not in render_dashboard(state)  # one session: no trends
+
+    d2 = _make_session(tmp_path, name="b_courtside", video="b.mp4")
+    doc = json.loads((d2 / "session.json").read_text())
+    doc["created_at"] = "2026-07-20T00:00:00+00:00"
+    doc["facts"]["outcomes"] = {"counts": {"net": 1}, "decided": 2, "errors": 1,
+                                "error_rate_pct": 50, "coverage_pct": 100,
+                                "unforced_proxy": 0, "note": "n"}
+    doc["facts"]["contact_quality"] = {"strokes_measured": 2, "pct_ideal": 60}
+    (d2 / "session.json").write_text(json.dumps(doc))
+    state = AppState([tmp_path])
+    dash = render_dashboard(state)
+    assert "Trends" in dash and "<polyline" in dash
