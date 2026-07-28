@@ -18,6 +18,12 @@ StrokeType = Literal[
 Player = Literal["near", "far", "unknown"]
 Severity = Literal["low", "medium", "high"]
 Confidence = Literal["low", "medium", "high"]
+# Outcome of the stroke's ball, only when visible in the sampled frames.
+# "out_long" covers everything past the baseline including back-fence balls -
+# frame sampling can't reliably separate "1m long" from "way long".
+Outcome = Literal["in_play", "net", "out_long", "out_wide", "unknown"]
+# How difficult the INCOMING ball made the stroke (VLM judgment from visible cues).
+Received = Literal["easy", "normal", "difficult", "unknown"]
 
 # Canonical flag vocabulary the prompt already names. Free-form codes fragment
 # report aggregation across synonyms (late_preparation vs late_prep), so the
@@ -70,6 +76,10 @@ class Stroke(BaseModel):
     stroke: StrokeType
     technique_flags: list[Flag] = Field(default_factory=list)
     tactical_flags: list[Flag] = Field(default_factory=list)
+    # defaulted so pre-existing session docs and older model outputs stay valid
+    outcome: Outcome = Field(default="unknown", description="Where this stroke's ball visibly went; 'unknown' unless clearly visible in the frames")
+    outcome_confidence: Confidence = Field(default="low", description="Confidence in the outcome call; 'low' when outcome is 'unknown'")
+    received: Received = Field(default="unknown", description="Difficulty the incoming ball imposed, from visible cues; 'unknown' if the approach is not visible")
 
 
 class ClipAnalysis(BaseModel):

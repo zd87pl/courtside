@@ -25,6 +25,8 @@ Task: identify each visible stroke (ball contact) by either player and assess it
 
 Rules:
 - "near" = player closer to the camera, "far" = player on the other side of the net.
+- The first stroke a player hits immediately after the opponent's serve is a "return" -
+  label it "return", not forehand/backhand.
 - Only report strokes you can actually see. Do not guess strokes that happen off-camera
   or between frames. It is fine to report fewer strokes than actually occurred.
 - t_s must be the absolute time in the FULL video. Use the per-frame timestamps above:
@@ -37,6 +39,18 @@ Rules:
   short_ball_no_approach, backhand_corner_camped, no_depth_variation, serve_placement_predictable,
   passive_mid_rally, poor_recovery_position.
 - Prefer these canonical flag codes where they apply (snake_case): {flag_vocab}.
+- outcome: what happened to THIS stroke's ball, only if visibly determinable from the
+  sampled frames: "net" = into the net; "out_long" = beyond the baseline (including balls
+  reaching the back fence); "out_wide" = outside the sideline; "in_play" = the rally
+  visibly continues after this shot. Landings often fall BETWEEN sampled frames - when you
+  cannot actually see where the ball went, use "unknown". Never infer an outcome from body
+  language or the players' reactions alone.
+- outcome_confidence: how sure you are of the outcome call. Use "low" when outcome is "unknown".
+- received: how difficult the INCOMING ball made this stroke, from visible cues only:
+  "difficult" = player clearly stretched, on the full run, jammed at the body, or handling
+  a high-bouncing/awkward ball; "easy" = stationary and balanced with the ball in a
+  comfortable strike zone; "normal" = routine movement. Use "unknown" when the player's
+  approach to the ball is not visible across the frames.
 - FORBIDDEN (monocular video cannot support these): claims about ground reaction force,
   weight transfer percentages, exact depth/distance in meters, foot-contact timing,
   racquet-head speed numbers. Never output these.
@@ -74,8 +88,12 @@ in the JSON.
 The 2-4 most recurrent tactical_flags, same citation rules.
 
 ## Prioritized Drills
-Exactly 3 drills, ordered by expected impact. Each: name, setup, success criterion, and
-which flagged issue it targets.
+Exactly 3 drills, ordered by expected impact. When the pre-computed facts include
+"error_matrix" or "outcomes", rank by measured error concentration first (the worst
+depth-and-lane court cells and the most frequent error outcomes), then by flag recurrence,
+and name the court cell or outcome cluster each drill targets. When those facts are
+absent, rank by flag recurrence. Each: name, setup, success criterion, and which flagged
+issue it targets.
 
 ## Confidence Notes
 1-3 sentences on where the analysis is least certain (low-confidence clips, occlusions,

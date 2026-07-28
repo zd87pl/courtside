@@ -31,6 +31,83 @@ def is_url(s: str) -> bool:
     return bool(URL_RE.match(s.strip()))
 
 
+_GDRIVE_ID_RES = [
+    re.compile(r"drive\.google\.com/file/d/([\w-]{10,})"),
+    re.compile(r"drive\.google\.com/(?:uc|open|download)\?[^#]*\bid=([\w-]{10,})"),
+]
+
+
+def gdrive_id(url: str) -> str | None:
+    """File id from any common Google Drive link shape, else None."""
+    for rx in _GDRIVE_ID_RES:
+        m = rx.search(url)
+        if m:
+            return m.group(1)
+    return None
+
+
+def fetch_gdrive(file_id: str, dest_dir: Path,
+                 on_line: Callable[[str], None] | None = None) -> Path:
+    """Direct Google Drive download (anyone-with-link files), streaming.
+
+    Uses the drive.usercontent endpoint with confirm=t, which serves large
+    files (1-3GB match videos) without the virus-scan interstitial. Progress
+    lines go to on_line so the CLI/UI console shows a live download.
+    """
+    import urllib.request
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    url = ("https://drive.usercontent.google.com/download"
+           f"?id={file_id}&export=download&confirm=t")
+    req = urllib.request.Request(url, headers={"User-Agent": "courtside/0.2"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        ctype = resp.headers.get("Content-Type", "")
+        if "text/html" in ctype:
+            raise RuntimeError(
+                "Google Drive returned a web page instead of the file - the link is "
+                "probably not shared as 'Anyone with the link'. Fix sharing and retry."
+            )
+        # filename from Content-Disposition when present
+        cd = resp.headers.get("Content-Disposition", "")
+        m = re.search(r'filename="([^"]+)"', cd)
+        name = re.sub(r"[^\w.\- ]+", "_", m.group(1)) if m else f"gdrive_{file_id}.mp4"
+        total = int(resp.headers.get("Content-Length") or 0)
+        final = dest_dir / name
+        # stream to a .part temp so an interrupted download never leaves a
+        # plausible-looking truncated video behind for analysis to pick up
+        part = dest_dir / (name + f".{uuid.uuid4().hex[:8]}.part")
+        done = 0
+        last_pct = -5
+        try:
+            with open(part, "wb") as f:
+                while True:
+                    chunk = resp.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    if total and on_line:
+                        pct = int(100 * done / total)
+                        if pct >= last_pct + 5:
+                            last_pct = pct
+                            on_line(f"[gdrive] {pct}% of {total / (1 << 30):.2f}GiB")
+        except BaseException:
+            part.unlink(missing_ok=True)
+            raise
+    if done == 0:
+        part.unlink(missing_ok=True)
+        raise RuntimeError("Google Drive download produced an empty file")
+    if total and done != total:
+        part.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Google Drive download incomplete ({done} of {total} bytes) - retry"
+        )
+    part.replace(final)
+    if on_line:
+        on_line(f"[gdrive] done: {final.name}")
+    return final
+
+
 def video_slug(url: str) -> str:
     """Stable short id for naming output dirs: the YouTube id when present."""
     u = url.strip()
@@ -58,6 +135,16 @@ def fetch_video(url: str, dest_dir: Path,
     run console) can show live download progress. Raises RuntimeError with an
     actionable message on any failure.
     """
+    # Google Drive links: go direct first (no yt-dlp needed, handles 1-3GB
+    # match files); fall through to yt-dlp only if the direct path fails.
+    gid = gdrive_id(url)
+    if gid:
+        try:
+            return fetch_gdrive(gid, dest_dir, on_line)
+        except Exception as e:  # noqa: BLE001
+            if on_line:
+                on_line(f"[gdrive] direct download failed ({e}); trying yt-dlp")
+
     if not ytdlp_available():
         raise RuntimeError(
             "yt-dlp is not installed - install it with: pip install 'courtside[youtube]'"
