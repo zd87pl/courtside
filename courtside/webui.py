@@ -754,6 +754,11 @@ def render_session(ref) -> str:
     rt = _dget(rs, "realtime_factor")
     peak = _dget(rs, "peak_gb")
     cloud = _dget(rs, "cloud_equiv_usd")
+    cov = _dget(facts, "coverage") or {}
+    cov_sub = ""
+    if isinstance(cov, dict) and _num(cov.get("downtime_removed_min")) >= 1:
+        cov_sub = (f'<div class="sub">{_num(cov.get("downtime_removed_min")):.0f} min '
+                   f'dead time skipped</div>')
     oc = _dget(facts, "outcomes") or {}
     err_tile = ""
     if _dget(oc, "decided"):
@@ -763,7 +768,7 @@ def render_session(ref) -> str:
     parts.append(f"""
 <div class="tiles">
   <div class="tile"><b class="tnum">{_e(_dget(facts, "total_strokes", 0))}</b><span>strokes</span></div>
-  <div class="tile"><b class="tnum">{_e(_dget(facts, "clips_analyzed", 0))}</b><span>rallies</span></div>
+  <div class="tile"><b class="tnum">{_e(_dget(facts, "clips_analyzed", 0))}</b><span>rallies</span>{cov_sub}</div>
   {err_tile}
   <div class="tile"><b class="tnum">{_e(_dget(split, "near", 0))} / {_e(_dget(split, "far", 0))}</b><span>near / far</span></div>
   <div class="tile accent"><b class="tnum">{_e(rt) if rt else "&mdash;"}&times;</b><span>realtime</span><div class="sub">end-to-end</div></div>

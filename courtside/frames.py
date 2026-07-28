@@ -54,6 +54,14 @@ class ClipFrames:
         return self.frames[nearest]
 
 
+def crop_filter(crop: tuple[int, int, int, int] | None) -> str:
+    """ffmpeg crop prefix for an (x, y, w, h) source-pixel box, or ''."""
+    if not crop:
+        return ""
+    x, y, w, h = crop
+    return f"crop={w}:{h}:{x}:{y},"
+
+
 def extract_clip_frames(
     video: Path,
     segment: Segment,
@@ -61,6 +69,7 @@ def extract_clip_frames(
     fps: float = 4.0,
     max_frames: int = 32,
     max_side: int = 784,
+    crop: tuple[int, int, int, int] | None = None,
 ) -> ClipFrames:
     out_dir.mkdir(parents=True, exist_ok=True)
     # Clear any stale frames from a previous run: ffmpeg -y only overwrites
@@ -73,9 +82,10 @@ def extract_clip_frames(
     dur = max(0.1, segment.duration)
     fps_used = min(fps, max_frames / dur)
 
-    # Long side -> max_side, preserve aspect ratio.
+    # Optional auto-crop (zoom to the active court region), then long side ->
+    # max_side, preserve aspect ratio.
     vf = (
-        f"fps={fps_used:.6f},"
+        f"fps={fps_used:.6f},{crop_filter(crop)}"
         f"scale='if(gt(iw,ih),{max_side},-2)':'if(gt(iw,ih),-2,{max_side})':flags=lanczos"
     )
     pattern = out_dir / "frame_%04d.jpg"
@@ -102,6 +112,7 @@ def extract_window_frames(
     post: float = 1.5,
     fps: float = 12.0,
     max_side: int = 720,
+    crop: tuple[int, int, int, int] | None = None,
 ) -> tuple[list[Path], float, float]:
     """High-fps frames around a flagged moment (for pose + overlay video).
 
@@ -111,8 +122,54 @@ def extract_window_frames(
     start = max(0.0, t_s - pre)
     seg = Segment(start, t_s + post)
     cf = extract_clip_frames(video, seg, out_dir, fps=fps,
-                             max_frames=int((pre + post) * fps) + 2, max_side=max_side)
+                             max_frames=int((pre + post) * fps) + 2, max_side=max_side,
+                             crop=crop)
     return cf.frames, start, cf.fps_used
+
+
+def extract_still(video: Path, t_s: float, out_path: Path) -> Path | None:
+    """One full-resolution, uncropped frame at t_s (court-homography anchor).
+
+    The court detector wants the WHOLE frame at native resolution - the analysis
+    crop may cut court lines and a downscale thins them below detectability.
+    Best-effort: returns None on failure."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+           "-ss", f"{max(0.0, t_s):.3f}", "-i", str(video),
+           "-frames:v", "1", "-q:v", "3", str(out_path)]
+    try:
+        subprocess.run(cmd, check=True, timeout=120)
+        return out_path if out_path.exists() and out_path.stat().st_size > 0 else None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def probe_resolution(video: Path) -> tuple[int, int] | None:
+    """Display (width, height) of the first video stream, or None.
+
+    Rotation side-data is honored: phone footage often stores landscape coded
+    dimensions plus a 90-degree display rotation, and every decoded frame in
+    this pipeline is rotation-applied, so the coded dims would be transposed
+    (finding: rotation side-data broke the resolution probe)."""
+    import json as _json
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height:stream_side_data=rotation",
+         "-of", "json", str(video)],
+        capture_output=True, text=True, check=False,
+    )
+    try:
+        stream = _json.loads(out.stdout)["streams"][0]
+        w, h = int(stream["width"]), int(stream["height"])
+        rot = 0
+        for sd in stream.get("side_data_list") or []:
+            if "rotation" in sd:
+                rot = int(sd["rotation"])
+        if abs(rot) % 180 == 90:
+            w, h = h, w
+        return (w, h) if w > 0 and h > 0 else None
+    except (ValueError, KeyError, IndexError, TypeError, _json.JSONDecodeError):
+        return None
 
 
 def slowmo_snippet(
@@ -124,6 +181,7 @@ def slowmo_snippet(
     slow: float = 2.5,
     max_side: int = 640,
     smooth: bool = False,
+    crop: tuple[int, int, int, int] | None = None,
 ) -> Path | None:
     """Slow-motion loop of a flagged moment.
 
@@ -133,7 +191,7 @@ def slowmo_snippet(
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     start = max(0.0, t_s - pre)
-    vf = f"scale='min({max_side},iw)':-2:flags=lanczos,setpts={slow:.2f}*PTS"
+    vf = f"{crop_filter(crop)}scale='min({max_side},iw)':-2:flags=lanczos,setpts={slow:.2f}*PTS"
     if smooth:
         vf += ",minterpolate=fps=30:mi_mode=mci:mc_mode=aobmc"
     cmd = [
@@ -159,6 +217,7 @@ def extract_flag_snippet(
     post: float = 1.5,
     label: str | None = None,
     max_side: int = 640,
+    crop: tuple[int, int, int, int] | None = None,
 ) -> Path | None:
     """Cut a short muted h264 loop around a flagged moment for the HTML report.
 
@@ -168,7 +227,7 @@ def extract_flag_snippet(
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     start = max(0.0, t_s - pre)
-    vf = f"scale='min({max_side},iw)':-2:flags=lanczos"
+    vf = f"{crop_filter(crop)}scale='min({max_side},iw)':-2:flags=lanczos"
     if label:
         safe = label.replace(":", "\\:").replace("'", "")
         vf += (

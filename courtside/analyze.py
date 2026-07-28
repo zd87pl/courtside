@@ -39,7 +39,7 @@ from pydantic import ValidationError
 
 from . import __version__, config, report
 from .fetch import fetch_video, is_url
-from .frames import ClipFrames, extract_clip_frames, probe_duration, require_tools
+from .frames import ClipFrames, extract_clip_frames, probe_duration, probe_resolution, require_tools
 from .prompts import SYSTEM, build_clip_prompt, build_report_prompt, limitations_footer
 from .report_html import write_html_report
 from .schema import CANONICAL_FLAG_CODES, ClipAnalysis, clip_json_schema
@@ -283,7 +283,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--segments-file", type=Path, help="JSON segments for --segment file")
     p.add_argument("--fps", type=float, default=config.DEFAULT_FPS)
     p.add_argument("--max-frames", type=int, default=config.DEFAULT_MAX_FRAMES)
-    p.add_argument("--max-side", type=int, default=config.DEFAULT_MAX_SIDE)
+    p.add_argument("--max-side", type=int, default=None,
+                   help=f"long-side pixels for model frames (default {config.DEFAULT_MAX_SIDE}; "
+                        "auto-raised to 1008 for 4K-class sources)")
+    p.add_argument("--crop", choices=("auto", "off"), default="auto",
+                   help="auto-zoom analysis to the detected active court region "
+                        "of high-res footage (default: auto)")
     p.add_argument("--max-clips", type=int, default=0, help="limit clips (0 = all)")
     p.add_argument("--max-tokens", type=int, default=1400)
     p.add_argument("--kv-bits", type=int, default=None, help="KV cache quantization bits (e.g. 4 or 8)")
@@ -397,16 +402,46 @@ def main(argv: list[str] | None = None) -> int:
         if not args.segments_file:
             p.error("--segment file requires --segments-file")
         segments = from_file(args.segments_file)
+    # coverage is judged on everything DETECTED, before any --max-clips
+    # truncation - play we chose not to analyze is not "dead time"
+    detected_active_s = sum(s.duration for s in segments)
+    downtime_s = max(0.0, duration - detected_active_s) if duration else 0.0
     if args.max_clips:
         segments = segments[: args.max_clips]
     segment_s = time.perf_counter() - t0
+    active_s = sum(s.duration for s in segments)
     _log(f"segments: {len(segments)} active clips "
-         f"({sum(s.duration for s in segments):.0f}s of play, {segment_s:.1f}s to detect)")
+         f"({active_s:.0f}s of play, {segment_s:.1f}s to detect)")
+    if duration and downtime_s >= 30:
+        _log(f"  dead time removed: {downtime_s/60:.1f} min of {duration/60:.1f} min "
+             f"({100*detected_active_s/duration:.0f}% of the footage is active play)")
     if not segments:
         _log("no segments found - try --segment fixed --window 15")
         return 1
     if curve is not None:
         (out_dir / "activity.json").write_text(json.dumps({"times": curve.times, "scores": curve.scores}))
+
+    # auto-crop: zoom every downstream stage to the active court region of
+    # high-resolution distant-camera footage (players/ball otherwise shrink
+    # into invisibility at model input sizes)
+    crop: tuple[int, int, int, int] | None = None
+    src_res = probe_resolution(video)
+    if args.crop == "auto" and curve is not None and src_res:
+        from .segment import motion_crop_box
+        crop = motion_crop_box(curve, src_res[0], src_res[1])
+        if crop:
+            _log(f"  auto-crop: analyzing {crop[2]}x{crop[3]} active region of "
+                 f"{src_res[0]}x{src_res[1]} (use --crop off to disable)")
+
+    # adaptive frame detail: a 4K source (even after crop) carries enough real
+    # resolution that the default 784px cap visibly costs accuracy
+    max_side = args.max_side
+    if max_side is None:
+        eff_w = crop[2] if crop else (src_res[0] if src_res else 0)
+        max_side = 1008 if eff_w >= 2000 else config.DEFAULT_MAX_SIDE
+        if max_side != config.DEFAULT_MAX_SIDE:
+            _log(f"  high-res source: frame detail raised to {max_side}px "
+                 f"(override with --max-side)")
 
     # 2) frames
     t_extract = time.perf_counter()
@@ -414,7 +449,8 @@ def main(argv: list[str] | None = None) -> int:
     for i, seg in enumerate(segments):
         try:
             cf = extract_clip_frames(video, seg, out_dir / f"clip_{i:03d}",
-                                     fps=args.fps, max_frames=args.max_frames, max_side=args.max_side)
+                                     fps=args.fps, max_frames=args.max_frames, max_side=max_side,
+                                     crop=crop)
         except Exception as e:  # one bad segment must not abort the run
             _log(f"  clip {i:03d}  extraction FAILED: {e} - skipping")
             continue
@@ -529,6 +565,14 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         facts = report.compute_session_facts(analyses)
+        if duration and downtime_s >= 30:
+            # the dead-time-removal story, stated as facts the report can cite
+            facts["coverage"] = {
+                "video_min": round(duration / 60, 1),
+                "active_play_min": round(detected_active_s / 60, 1),
+                "downtime_removed_min": round(downtime_s / 60, 1),
+                "active_pct": round(100 * detected_active_s / duration),
+            }
         fps_used_values = [c["fps_used"] for c in clip_records if c.get("fps_used")]
         res_s = report.frame_resolution_s(fps_used_values)
 
@@ -542,7 +586,7 @@ def main(argv: list[str] | None = None) -> int:
                 moments, contact_quality = build_moments(
                     video, analyses, out_dir, vlm=vlm,
                     cap=args.moments, use_pose=not args.no_pose,
-                    smooth_slowmo=args.smooth_slowmo, log=_log)
+                    smooth_slowmo=args.smooth_slowmo, crop=crop, log=_log)
             except Exception as e:  # noqa: BLE001 - deep dives must never kill the report
                 _log(f"  moments failed ({type(e).__name__}: {e}) - continuing without")
         if contact_quality.get("summary"):
@@ -627,7 +671,8 @@ def main(argv: list[str] | None = None) -> int:
         session_doc = report.build_session_doc(
             version=__version__, video_name=video.name, video_duration_s=duration,
             model=model_name, backend=backend,
-            settings={"fps": args.fps, "max_frames": args.max_frames, "max_side": args.max_side,
+            settings={"fps": args.fps, "max_frames": args.max_frames, "max_side": max_side,
+                      "crop": list(crop) if crop else None,
                       "segment": args.segment, "kv_bits": args.kv_bits},
             created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             run_stats=run_stats, facts=facts, clips=clip_records,

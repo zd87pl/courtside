@@ -134,6 +134,7 @@ def _deepdive_card(vlm, moment: dict[str, Any], frames: list[Path], window_s: fl
 
 def assess_session_contacts(video: Path, analyses: list[ClipAnalysis], out_dir: Path,
                             estimator, ball_detector, cap: int = 40,
+                            crop: tuple[int, int, int, int] | None = None,
                             log=print) -> dict[str, Any]:
     """Contact-height sweep over EVERY stroke (not just flagged ones).
 
@@ -143,7 +144,10 @@ def assess_session_contacts(video: Path, analyses: list[ClipAnalysis], out_dir: 
     """
     import shutil
 
+    import cv2
+
     from .ball import assess_contact, summarize_contacts
+    from .frames import extract_still, probe_resolution
     from .pose import ankle_midpoint
 
     # serves and returns first: they anchor the serve/return court analysis,
@@ -156,10 +160,20 @@ def assess_session_contacts(video: Path, analyses: list[ClipAnalysis], out_dir: 
     workdir = out_dir / "moments" / "contact_sweep"
     records: list[dict[str, Any]] = []
     anchor_saved = False
+    # Coordinate space contract: the court anchor is a FULL-RESOLUTION,
+    # UNCROPPED source frame (the crop may cut court lines; a downscale thins
+    # them below detectability), so ankle positions are converted from window-
+    # frame pixels back to source pixels. If the source resolution can't be
+    # probed, fall back to the old pairing (window-frame anchor + window-frame
+    # coords) - the two must always share one space.
+    src_res = probe_resolution(video)
     for j, s in enumerate(strokes):
         try:
+            # 960px (up from 640): on 4K footage the far player's keypoints
+            # were too small at 640px
             frames, start_s, fps = extract_window_frames(
-                video, s.t_s, workdir / f"s{j:03d}", pre=0.2, post=0.2, fps=12.0, max_side=640)
+                video, s.t_s, workdir / f"s{j:03d}", pre=0.2, post=0.2, fps=12.0,
+                max_side=960, crop=crop)
             if not frames:
                 continue
             idx = min(len(frames) - 1, max(0, round((s.t_s - start_s) * fps)))
@@ -168,16 +182,32 @@ def assess_session_contacts(video: Path, analyses: list[ClipAnalysis], out_dir: 
             if pose is None:
                 continue
             if not anchor_saved:
-                # one full frame kept for court-homography detection later
-                shutil.copyfile(win.frame_paths[win.contact_idx], out_dir / "court_anchor.jpg")
-                anchor_saved = True
+                anchor = out_dir / "court_anchor.jpg"
+                if src_res and extract_still(video, s.t_s, anchor):
+                    anchor_saved = True
+                else:
+                    src_res = None  # window-frame space for anchor AND coords
+                    shutil.copyfile(win.frame_paths[win.contact_idx], anchor)
+                    anchor_saved = True
             c = assess_contact(pose, s.stroke, win.frame_paths, win.contact_idx, ball_detector)
             if c:
+                # ball_px/lines_px are window-frame pixels while ankle_px below
+                # is source pixels - strip them so the persisted record never
+                # mixes coordinate spaces
                 rec: dict[str, Any] = {"t_s": s.t_s, "player": s.player, "stroke": s.stroke,
-                                       "contact": {k: v for k, v in c.items() if k != "lines_px"}}
+                                       "contact": {k: v for k, v in c.items()
+                                                   if k not in ("lines_px", "ball_px")}}
                 mid = ankle_midpoint(pose)
                 if mid:
-                    rec["ankle_px"] = [round(mid[0], 1), round(mid[1], 1)]
+                    ax, ay = float(mid[0]), float(mid[1])
+                    if src_res:
+                        fh, fw = cv2.imread(str(win.frame_paths[win.contact_idx])).shape[:2]
+                        if crop:
+                            cx, cy, cw, ch = crop
+                            ax, ay = cx + ax * cw / fw, cy + ay * ch / fh
+                        else:
+                            ax, ay = ax * src_res[0] / fw, ay * src_res[1] / fh
+                    rec["ankle_px"] = [round(ax, 1), round(ay, 1)]
                 records.append(rec)
         except Exception:  # noqa: BLE001 - one stroke must not kill the sweep
             continue
@@ -198,6 +228,7 @@ def build_moments(
     cap: int = 6,
     use_pose: bool = True,
     smooth_slowmo: bool = False,
+    crop: tuple[int, int, int, int] | None = None,
     log=print,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Deep-dive assets + cards for the top flagged strokes, plus the
@@ -240,7 +271,7 @@ def build_moments(
 
         # 1) slow-motion error clip (always attempted)
         slow = slowmo_snippet(video, m["t_s"], mdir / f"moment_{i:02d}_slowmo.mp4",
-                              smooth=smooth_slowmo)
+                              smooth=smooth_slowmo, crop=crop)
         if slow:
             assets.slowmo = f"moments/{slow.name}"
 
@@ -249,7 +280,7 @@ def build_moments(
         if estimator is not None:
             try:
                 frames, start_s, fps = extract_window_frames(
-                    video, m["t_s"], mdir / f"moment_{i:02d}_frames")
+                    video, m["t_s"], mdir / f"moment_{i:02d}_frames", crop=crop)
                 nominal = min(len(frames) - 1, max(0, round((m["t_s"] - start_s) * fps)))
                 window = estimator.track_window(frames, m["player"], fps, start_s, nominal)
                 rec["contact_t_s"] = round(window.contact_t_s, 2)
@@ -305,7 +336,8 @@ def build_moments(
             if ref_t is not None:
                 try:
                     ghost = _build_ghost(estimator, video, m, window, ref_t,
-                                         mdir / f"moment_{i:02d}_ghost.mp4", mdir, i)
+                                         mdir / f"moment_{i:02d}_ghost.mp4", mdir, i,
+                                         crop=crop)
                     if ghost:
                         assets.ghost_video = f"moments/{ghost.name}"
                         rec["reference_t_s"] = ref_t
@@ -315,7 +347,7 @@ def build_moments(
         # 4) deep-dive coaching card
         if vlm is not None:
             frames_for_card = (window.frame_paths[::2][:8] if window is not None
-                               else _card_frames(video, m["t_s"], mdir, i))
+                               else _card_frames(video, m["t_s"], mdir, i, crop=crop))
             if frames_for_card:
                 card = _deepdive_card(vlm, m, frames_for_card, 3.0, rec.get("angles"),
                                       contact=rec.get("contact_height"))
@@ -331,29 +363,32 @@ def build_moments(
     contact_quality: dict[str, Any] = {}
     if estimator is not None:
         contact_quality = assess_session_contacts(video, analyses, out_dir,
-                                                  estimator, ball_detector, log=log)
+                                                  estimator, ball_detector,
+                                                  crop=crop, log=log)
     return moments, contact_quality
 
 
-def _card_frames(video: Path, t_s: float, mdir: Path, i: int) -> list[Path]:
+def _card_frames(video: Path, t_s: float, mdir: Path, i: int,
+                 crop: tuple[int, int, int, int] | None = None) -> list[Path]:
     """Frames for the VLM card when pose is unavailable (no window extracted yet)."""
     try:
         frames, _, _ = extract_window_frames(video, t_s, mdir / f"moment_{i:02d}_frames",
-                                             fps=4.0, max_side=784)
+                                             fps=4.0, max_side=784, crop=crop)
         return frames[:8]
     except Exception:  # noqa: BLE001
         return []
 
 
 def _build_ghost(estimator, video: Path, moment: dict[str, Any], window,
-                 ref_t: float, out_path: Path, mdir: Path, i: int):
+                 ref_t: float, out_path: Path, mdir: Path, i: int,
+                 crop: tuple[int, int, int, int] | None = None):
     """Overlay the reference stroke's normalized skeleton onto the flagged window."""
     import numpy as np
 
     from .pose import normalize_to, render_overlay_video
 
     ref_frames, ref_start, ref_fps = extract_window_frames(
-        video, ref_t, mdir / f"moment_{i:02d}_ref_frames")
+        video, ref_t, mdir / f"moment_{i:02d}_ref_frames", crop=crop)
     nominal = min(len(ref_frames) - 1, max(0, round((ref_t - ref_start) * ref_fps)))
     ref_win = estimator.track_window(ref_frames, moment["player"], ref_fps, ref_start, nominal)
 
