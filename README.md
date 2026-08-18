@@ -3,6 +3,22 @@
 Local tennis video analysis on Apple Silicon - a laptop-scale twin of the AceLens VLM
 stage. Pure MLX, nothing leaves the machine.
 
+## Product identity
+
+Courtside is an **error-tracking resource for coaches** — the courtside error chart
+(zone 1–5 × runway C-L/B-L/A/B-R/C-R, strike zone, result), filled in automatically
+from match video with the evidence attached. It supports the coach's judgment; it does
+not hand players technique doctrine. Every feature idea gets three tests before it's
+built:
+
+1. **Does it track or explain errors?** We track errors; we are not in the
+   technique-suggestion business.
+2. **Does it make a coach reach for us?** Output is a briefing for the coach's own
+   coaching conversation, never a replacement for it.
+3. **Is it table stakes or differentiation?** Phone-camera capture, dead-time cutting,
+   and shot recognition are parity features — the error-tracking layer is what
+   differentiates.
+
 **Pipeline:** motion-energy rally segmentation → capped frame sampling (~32 frames/clip)
 → per-clip stroke JSON from a local VLM (schema-validated) → aggregated Markdown
 coaching report with monocular-video guardrails.

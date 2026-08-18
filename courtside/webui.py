@@ -526,15 +526,16 @@ def render_dashboard(state, error: str | None = None) -> str:
                      f'<span class="sp"></span><a class="btn" href="/run/{_e(active.rid)}">Watch progress</a></div>')
 
     # hero
-    rt_v = f"{best_rt:.0f}&times;" if best_rt else "Faster"
+    rt_v = f"{best_rt:.0f}&times;" if best_rt >= 1 else "Faster"
     rt_d = "faster than watching it" if best_rt else "than realtime"
     cloud_d = f"vs ~${cloud_ex:.2f}/session on a frontier API" if cloud_ex else "no per-minute cloud bill"
     parts.append(f"""
 <div class="hero">
-  <div class="eyebrow">On-device sports intelligence</div>
-  <h2>Turn raw match video into a coach-ready scouting report &mdash; privately, on your own machine.</h2>
-  <p>Courtside segments rallies, reads every stroke with a local vision-language model, and writes a
-     prioritized coaching report. No clips leave the device.</p>
+  <div class="eyebrow">Error tracking for coaches</div>
+  <h2>Every error, mapped &mdash; the courtside error chart, filled in from video automatically.</h2>
+  <p>Courtside skips the dead time, finds every stroke, and charts each error by court zone, runway,
+     and strike zone &mdash; with the video evidence attached. Built to support the coach's eye,
+     never to replace it. No clips leave the device.</p>
   <div class="pillars">
     <div class="pillar"><div class="v">100% on-device</div><div class="k">Private by architecture</div>
       <div class="d">footage never leaves the laptop</div></div>
@@ -1015,14 +1016,13 @@ def _serve_return_panel(sr: dict) -> str:
             f'<p class="hint">{note}</p>{body}{legend if positions else ""}</div>')
 
 
-_LANE_LABELS = {"wide_left": "wide L", "left": "L", "center": "center",
-                "right": "R", "wide_right": "wide R"}
-_DEPTH_ROWS = ("net", "midcourt", "baseline", "behind_baseline")  # net at top
-_LANE_COLS = ("wide_left", "left", "center", "right", "wide_right")
+_RUNWAY_COLS = ("C-L", "B-L", "A", "B-R", "C-R")
+_ZONE_ROWS = ((1, "net"), (2, "mid-court"), (3, "no-man's"), (4, "baseline"), (5, "back"))
 
 
 def _error_matrix_panel(em: dict) -> str:
-    """Depth x runway error matrix: the zone-grid heatmap, per player."""
+    """Zone (1-5) x runway (C-L..C-R) error grid - the manual error-tracking
+    template coaches already know, filled in automatically. Per player."""
     players = _dget(em, "players") or {}
     grids: list[str] = []
     for player in ("near", "far"):
@@ -1032,16 +1032,16 @@ def _error_matrix_panel(em: dict) -> str:
         cells = pdoc.get("cells") or {}
         max_err = max((int(_num(c.get("errors"))) for c in cells.values()
                        if isinstance(c, dict)), default=0)
-        rows = ['<div style="display:grid;grid-template-columns:88px repeat(5,minmax(44px,1fr));'
+        rows = ['<div style="display:grid;grid-template-columns:96px repeat(5,minmax(44px,1fr));'
                 'gap:3px;font-size:11.5px">']
         rows.append('<div></div>' + "".join(
-            f'<div style="text-align:center;color:var(--muted);padding:2px 0">{_e(_LANE_LABELS[l])}</div>'
-            for l in _LANE_COLS))
-        for depth in _DEPTH_ROWS:
+            f'<div style="text-align:center;color:var(--muted);padding:2px 0">{_e(r)}</div>'
+            for r in _RUNWAY_COLS))
+        for znum, zname in _ZONE_ROWS:
             rows.append(f'<div style="color:var(--ink-2);align-self:center;text-align:right;'
-                        f'padding-right:8px">{_e(depth.replace("_", " "))}</div>')
-            for lane in _LANE_COLS:
-                c = cells.get(f"{depth}:{lane}")
+                        f'padding-right:8px"><b class="tnum">{znum}</b> &middot; {_e(zname)}</div>')
+            for runway in _RUNWAY_COLS:
+                c = cells.get(f"z{znum}:{runway}")
                 if not isinstance(c, dict) or not c.get("measured"):
                     rows.append('<div style="border:1px solid var(--border-2);border-radius:6px;'
                                 'aspect-ratio:1.5;display:flex;align-items:center;justify-content:center;'
@@ -1057,7 +1057,7 @@ def _error_matrix_panel(em: dict) -> str:
                         (("net", "net"), ("out_long", "long"), ("out_wide", "wide"),
                          ("flagged", "flagged"), ("poor_contact", "poor contact"))
                         if int(_num(c.get(k)))]
-                tip = f"<span class='h'>{depth.replace('_', ' ')} &middot; {_LANE_LABELS[lane]}</span>" \
+                tip = f"<span class='h'>zone {znum} ({zname}) &middot; runway {runway}</span>" \
                       + (f"<br>{' &middot; '.join(bits)}" if bits else "<br>no errors")
                 rows.append(f'<div data-tip="{_e(tip)}" style="border:1px solid var(--border-2);'
                             f'border-radius:6px;aspect-ratio:1.5;display:flex;flex-direction:column;'
@@ -1074,11 +1074,15 @@ def _error_matrix_panel(em: dict) -> str:
     for w in (_dget(em, "worst_cells") or [])[:5]:
         if not isinstance(w, dict):
             continue
-        depth, lane = (str(w.get("cell", "")).split(":", 1) + [""])[:2]
+        zpart, runway = (str(w.get("cell", "")).split(":", 1) + [""])[:2]
+        znum = zpart.lstrip("z")
+        zname = dict(_ZONE_ROWS).get(int(znum)) if znum.isdigit() else None
+        cell_label = (f"zone {znum} ({zname}) &middot; {runway}" if zname
+                      else str(w.get("cell", "")).replace("_", " "))
         rows_w.append(f'<div style="display:flex;gap:10px;font-size:12.5px;padding:4px 0;'
                       f'border-bottom:1px solid var(--border-2)">'
                       f'<span style="width:44px;color:var(--ink-2)">{_e(w.get("player", ""))}</span>'
-                      f'<span style="flex:1">{_e(depth.replace("_", " "))} &middot; {_e(_LANE_LABELS.get(lane, lane))}</span>'
+                      f'<span style="flex:1">{cell_label}</span>'
                       f'<span class="tnum" style="color:var(--crit)">{int(_num(w.get("errors")))} errors</span>'
                       f'<span class="tnum">of {int(_num(w.get("measured")))}</span></div>')
     worst = (f'<div style="flex:0 1 280px;min-width:240px"><div class="kicker" style="margin:0 0 6px">'
@@ -1108,10 +1112,12 @@ def _error_matrix_panel(em: dict) -> str:
                   '<span><span class="sw" style="background:var(--accent)"></span>poor contact</span></div>')
         dots = f'<div style="flex:0 0 auto">{"".join(s)}{legend}</div>'
 
-    note = ("Where the player stood when errors happened (fixed-camera homography). "
-            "Error = AI-called outcome (net/long/wide), a medium+ flag, or poor measured "
-            "contact. Far-half positions have lower lane precision.")
-    return (f'<div class="card"><h2>Error map &mdash; depth &times; runway</h2>'
+    note = ("The zone (1=net &hellip; 5=back) &times; runway (C-L / B-L / A / B-R / C-R) "
+            "error grid coaches track by hand, filled in automatically from video. "
+            "Cells show where the player stood when errors happened (fixed-camera "
+            "homography). Error = AI-called outcome (net/long/wide), a medium+ flag, or "
+            "poor measured contact. Far-half positions have lower runway precision.")
+    return (f'<div class="card"><h2>Error map &mdash; zone &times; runway</h2>'
             f'<p class="hint">{note}</p>'
             f'<div style="display:flex;gap:26px;flex-wrap:wrap">{dots}{"".join(grids)}{worst}</div></div>')
 

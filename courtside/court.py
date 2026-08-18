@@ -24,6 +24,31 @@ SINGLES_W = COURT_W - 2 * ALLEY_M  # 8.23m
 LANES = ("wide_left", "left", "center", "right", "wide_right")
 DEPTHS = ("net", "midcourt", "baseline", "behind_baseline")
 
+# The coach-facing zone x runway template (matches the manual error-tracking
+# convention coaches already use): five depth zones numbered 1 (net) to
+# 5 (back fence) and five lateral runways C-Left, B-Left, A (center),
+# B-Right, C-Right. Runways are the doubles alleys plus singles thirds -
+# identical strips to LANES, coach-facing names.
+RUNWAY_LABELS = {"wide_left": "C-L", "left": "B-L", "center": "A",
+                 "right": "B-R", "wide_right": "C-R"}
+RUNWAYS = ("C-L", "B-L", "A", "B-R", "C-R")
+ZONE_NAMES = {1: "net", 2: "mid-court", 3: "no-man's land", 4: "baseline", 5: "back"}
+_SERVICE_LINE_M = 6.40  # from the net
+_NML_END_M = 9.5        # no-man's land ends ~2.4m inside the baseline
+
+
+def zone_number(dist_from_net: float, depth_from_baseline: float) -> int:
+    """Depth zone 1-5 for a player's position (1 = net ... 5 = back fence)."""
+    if depth_from_baseline > 0.5:
+        return 5
+    if dist_from_net <= 2.5:
+        return 1
+    if dist_from_net <= _SERVICE_LINE_M:
+        return 2
+    if dist_from_net <= _NML_END_M:
+        return 3
+    return 4
+
 
 def lane_for_x(x_m: float) -> str:
     """5 runway lanes from the player's own perspective (x already mirrored for
@@ -123,8 +148,11 @@ def position_zone(x_m: float, y_m: float) -> dict[str, str]:
     x = x_m if near else COURT_W - x_m  # mirror for far player
     third = COURT_W / 3
     lateral = "left" if x < third else ("right" if x > 2 * third else "center")
+    lane = lane_for_x(x)
     return {"half": "near" if near else "far", "depth": depth, "lateral": lateral,
-            "lane": lane_for_x(x), "zone": f"{depth}_{lateral}"}
+            "lane": lane, "runway": RUNWAY_LABELS[lane],
+            "zone_number": zone_number(dist_from_net, depth_from_baseline),
+            "zone": f"{depth}_{lateral}"}
 
 
 def _map_positions(H: np.ndarray, records: list[dict[str, Any]],
@@ -277,9 +305,12 @@ def build_error_matrix(
     same honesty rule as the serve/return map.
     """
     doc: dict[str, Any] = {
-        "lanes": list(LANES), "depths": list(DEPTHS),
+        "zones": {str(k): v for k, v in ZONE_NAMES.items()},
+        "runways": list(RUNWAYS),
         "players": {}, "worst_cells": [], "positions": [],
-        "note": ("cells are where the player STOOD at contact via fixed-camera "
+        "note": ("zone (1=net .. 5=back) x runway (C-L/B-L/A/B-R/C-R) grid - the "
+                 "manual error-tracking template, filled in automatically. Cells "
+                 "are where the player STOOD at contact via fixed-camera "
                  "homography; outcome/received are model judgments; flag and "
                  "contact criteria are measured."),
     }
@@ -314,7 +345,7 @@ def build_error_matrix(
     sev_rank = {"low": 1, "medium": 2, "high": 3}
     for r, x_m, y_m, zone in mapped:
         court_xy = (x_m, y_m)
-        cell = f'{zone["depth"]}:{zone["lane"]}'
+        cell = f'z{zone["zone_number"]}:{zone["runway"]}'
         si = info_for(float(r["t_s"]))
         outcome = si.get("outcome", "unknown")
         quality = (r.get("contact") or {}).get("quality", "acceptable")
@@ -345,6 +376,7 @@ def build_error_matrix(
             doc["positions"].append({
                 "t_s": r["t_s"], "player": player, "stroke": r.get("stroke"),
                 "x_m": court_xy[0], "y_m": court_xy[1], "cell": cell,
+                "zone_number": zone["zone_number"], "runway": zone["runway"],
                 "causes": causes,
             })
 
