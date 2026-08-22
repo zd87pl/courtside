@@ -231,3 +231,17 @@ def test_extract_clip_frames_applies_crop(tmp_path):
     assert cf.frames
     h, w = cv2.imread(str(cf.frames[0])).shape[:2]
     assert (w, h) == (320, 180)
+
+
+def test_motion_crop_ignores_weak_stray_clusters():
+    """A walker or adjacent-court mover must not stretch the crop box until
+    cropping is declined (review of real multi-court footage)."""
+    mm = np.zeros((216, 384), dtype=np.float32)
+    mm[60:150, 120:260] = 10.0     # dominant play area (our court)
+    mm[5:9, 370:378] = 1.0         # stray corner mover, tiny mass
+    c = ActivityCurve(times=[0.0], scores=[1.0], duration=1.0, motion_map=mm)
+    box = motion_crop_box(c, 3840, 2160)
+    assert box is not None
+    x, y, w, h = box
+    # the stray top-right corner cluster is excluded from the box
+    assert x + w < 3700 and y <= (60 / 216) * 2160 + 300

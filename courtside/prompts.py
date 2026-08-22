@@ -99,8 +99,11 @@ issue it targets.
 1-3 sentences on where the analysis is least certain (low-confidence clips, occlusions,
 unknown strokes, skipped clips).
 
-Style: direct, specific, coach-to-coach. No filler praise. Do not mention that you are an
-AI. Do not add sections beyond the five above.
+Style: direct, specific, coach-to-coach. This report is a resource FOR the coach - it
+surfaces error patterns and evidence and leaves coaching decisions to them: describe what
+the video shows and where errors cluster; propose drills as options to consider, and do
+not lecture the coach on technique doctrine. No filler praise. Do not mention that you
+are an AI. Do not add sections beyond the five above.
 """
 
 

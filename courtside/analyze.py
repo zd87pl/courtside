@@ -406,12 +406,17 @@ def main(argv: list[str] | None = None) -> int:
     # truncation - play we chose not to analyze is not "dead time"
     detected_active_s = sum(s.duration for s in segments)
     downtime_s = max(0.0, duration - detected_active_s) if duration else 0.0
+    n_detected = len(segments)
     if args.max_clips:
         segments = segments[: args.max_clips]
     segment_s = time.perf_counter() - t0
     active_s = sum(s.duration for s in segments)
     _log(f"segments: {len(segments)} active clips "
          f"({active_s:.0f}s of play, {segment_s:.1f}s to detect)")
+    if len(segments) < n_detected:
+        _log(f"  ! PARTIAL RUN: analyzing only the first {len(segments)} of "
+             f"{n_detected} detected rallies (--max-clips). Results cover "
+             f"{active_s/60:.1f} of {detected_active_s/60:.1f} min of play.")
     if duration and downtime_s >= 30:
         _log(f"  dead time removed: {downtime_s/60:.1f} min of {duration/60:.1f} min "
              f"({100*detected_active_s/duration:.0f}% of the footage is active play)")
@@ -565,6 +570,12 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         facts = report.compute_session_facts(analyses)
+        if len(segments) < n_detected:
+            facts["partial"] = {
+                "rallies_detected": n_detected,
+                "rallies_analyzed": len(segments),
+                "note": "quick/max-clips run - only the first rallies were analyzed",
+            }
         if duration and downtime_s >= 30:
             # the dead-time-removal story, stated as facts the report can cite
             facts["coverage"] = {

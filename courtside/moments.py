@@ -41,10 +41,14 @@ Stroke: {stroke} by the {player} player.
 
 {angles_block}
 
-Write a coaching card for this exact moment. Rules:
+Write a coaching card for this exact moment. This card is a briefing FOR the
+coach - material they can use in their own coaching conversation, not
+instructions that bypass them. Rules:
 - Ground every claim in what is visible in the frames{angles_hint}.
-- The correction must be one concrete change, not a list.
-- The target must be measurable or checkable by the player themselves
+- The correction is a suggestion for the coach to evaluate: one concrete
+  observation-backed adjustment, not a list, phrased as evidence
+  ("contact is behind the front hip on these frames") rather than a directive.
+- The target must be measurable or checkable
   (an angle range, a timing cue like "racquet back before the bounce", a contact-point cue).
 - Monocular video: never claim forces, weight transfer percentages, or absolute distances.
 

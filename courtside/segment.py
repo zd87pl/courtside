@@ -206,6 +206,19 @@ def motion_crop_box(curve: ActivityCurve, frame_w: int, frame_h: int,
         return None
     m = cv2.GaussianBlur(mm, (9, 9), 0)
     mask = m >= 0.18 * float(m.max())
+    # Drop weak motion clusters before boxing: walkers, wind-blown banners, and
+    # players on ADJACENT courts otherwise stretch the box until cropping is
+    # declined. Each player on the filmed court accumulates far more motion
+    # mass over a session than incidental movers (finding: side-court players
+    # defeated the auto-crop on real multi-court footage).
+    n_lbl, labels = cv2.connectedComponents(mask.astype(np.uint8))
+    if n_lbl > 2:  # background + more than one cluster
+        masses = np.array([float(m[labels == i].sum()) for i in range(1, n_lbl)])
+        total = float(masses.sum())
+        if total > 0:
+            keep = {i + 1 for i, mass in enumerate(masses) if mass >= 0.05 * total}
+            if keep:
+                mask = np.isin(labels, list(keep))
     ys, xs = np.nonzero(mask)
     if len(xs) < 8:
         return None

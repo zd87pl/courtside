@@ -51,6 +51,37 @@ def test_outcome_facts_all_unknown():
     assert compute_session_facts([])["outcomes"]["coverage_pct"] == 0
 
 
+def test_zone_number_and_runway_template():
+    """The coach-facing template: zones 1 (net) .. 5 (back), runways C-L..C-R."""
+    mid = COURT_L / 2
+    # near player at increasing distance from the net
+    assert position_zone(COURT_W / 2, mid + 1.5)["zone_number"] == 1
+    assert position_zone(COURT_W / 2, mid + 4.0)["zone_number"] == 2
+    assert position_zone(COURT_W / 2, mid + 7.0)["zone_number"] == 3
+    assert position_zone(COURT_W / 2, mid + 10.0)["zone_number"] == 4
+    assert position_zone(COURT_W / 2, COURT_L + 1.0)["zone_number"] == 5
+    # runway labels, mirrored for the far player
+    assert position_zone(COURT_W / 2, mid + 10.0)["runway"] == "A"
+    assert position_zone(0.5, mid + 10.0)["runway"] == "C-L"
+    assert position_zone(COURT_W - 0.5, -1.0)["runway"] == "C-L"  # far player's left
+
+
+def test_error_matrix_cells_use_template_keys(tmp_path):
+    anchor = _court_anchor(tmp_path)
+    records = [_rec(1, "forehand", "near", quality="poor", ankle=[320, 300]),
+               _rec(3, "backhand", "near", ankle=[250, 295]),
+               _rec(5, "forehand", "near", ankle=[420, 305]),
+               _rec(7, "backhand", "near", ankle=[350, 280])]
+    info = [{"t_s": t, "outcome": "net" if t == 3 else "in_play", "max_severity": ""}
+            for t in (1, 3, 5, 7)]
+    doc = build_error_matrix(anchor, records, info, tmp_path / "em.json")
+    assert doc["court_detected"] is True
+    import re
+    for cell in doc["players"]["near"]["cells"]:
+        assert re.fullmatch(r"z[1-5]:(C-L|B-L|A|B-R|C-R)", cell), cell
+    assert doc["runways"] == ["C-L", "B-L", "A", "B-R", "C-R"]
+
+
 def test_lane_boundaries():
     third = SINGLES_W / 3
     assert lane_for_x(0.5) == "wide_left"

@@ -275,17 +275,17 @@ def test_error_matrix_panel_renders_and_legacy_docs_skip_it(tmp_path):
     doc = json.loads((d / "session.json").read_text())
     doc["error_matrix"] = {
         "court_detected": True,
-        "lanes": ["wide_left", "left", "center", "right", "wide_right"],
-        "depths": ["net", "midcourt", "baseline", "behind_baseline"],
+        "zones": {"1": "net", "2": "mid-court", "3": "no-man's land", "4": "baseline", "5": "back"},
+        "runways": ["C-L", "B-L", "A", "B-R", "C-R"],
         "players": {"near": {"measured": 3, "errors": 2, "cells": {
-            "baseline:center": {"measured": 2, "errors": 2, "net": 1, "out_long": 0,
+            "z4:A": {"measured": 2, "errors": 2, "net": 1, "out_long": 0,
                                 "out_wide": 0, "flagged": 1, "poor_contact": 0},
-            "net:left": {"measured": 1, "errors": 0, "net": 0, "out_long": 0,
+            "z1:B-L": {"measured": 1, "errors": 0, "net": 0, "out_long": 0,
                          "out_wide": 0, "flagged": 0, "poor_contact": 0}}}},
-        "worst_cells": [{"player": "near", "cell": "baseline:center",
+        "worst_cells": [{"player": "near", "cell": "z4:A",
                          "errors": 2, "measured": 2}],
         "positions": [{"t_s": 11.0, "player": "near", "stroke": "forehand",
-                       "x_m": 5.0, "y_m": 22.0, "cell": "baseline:center",
+                       "x_m": 5.0, "y_m": 22.0, "cell": "z4:A", "zone_number": 4, "runway": "A",
                        "causes": ["net", "flag"]}],
     }
     doc["facts"]["outcomes"] = {"counts": {"net": 1, "in_play": 1}, "decided": 2,
@@ -316,3 +316,22 @@ def test_trends_panel_needs_two_real_sessions(tmp_path):
     state = AppState([tmp_path])
     dash = render_dashboard(state)
     assert "Trends" in dash and "<polyline" in dash
+
+
+def test_partial_run_banner_and_quick_not_default(tmp_path):
+    d = _make_session(tmp_path)
+    doc = json.loads((d / "session.json").read_text())
+    doc["facts"]["partial"] = {"rallies_detected": 47, "rallies_analyzed": 3,
+                               "note": "quick"}
+    (d / "session.json").write_text(json.dumps(doc))
+    state = AppState([tmp_path])
+    ref = next(iter(state.sessions().values()))
+    page = render_session(ref)
+    assert "Partial run" in page and "3" in page and "47" in page
+
+    dash = render_dashboard(state)
+    # the quick-test checkbox must NOT be pre-checked: a full-match analysis
+    # is the default (finding: 40-min video analyzed for 40 seconds)
+    import re
+    m = re.search(r'<input type="checkbox" name="quick"[^>]*>', dash)
+    assert m and "checked" not in m.group(0)
