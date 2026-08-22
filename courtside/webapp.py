@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import subprocess
 import sys
@@ -313,6 +314,57 @@ def _analyze_argv(form: dict[str, str], out_dir: Path) -> list[str]:
     return argv
 
 
+def recalibrate_session(sdir: Path, corners: list) -> dict:
+    """Rebuild the court analyses from a manual 4-corner calibration.
+
+    Uses only data already in session.json (measured contact strokes + stored
+    clip analyses) - zero model calls, instant. Corner order: far-left,
+    far-right, near-right, near-left of the DOUBLES court, source pixels."""
+    from .court import build_error_matrix, build_serve_return_map, homography_from_corners
+
+    doc = json.loads((sdir / "session.json").read_text())
+    records = (doc.get("contact_quality") or {}).get("strokes") or []
+    if not records:
+        raise ValueError("This session has no measured strokes to place on the court.")
+    H = homography_from_corners([tuple(map(float, c)) for c in corners])
+
+    rank = {"low": 1, "medium": 2, "high": 3}
+    flagged: set[float] = set()
+    info: list[dict] = []
+    for c in doc.get("clips") or []:
+        for s in (c.get("analysis") or {}).get("strokes") or []:
+            flags = (s.get("technique_flags") or []) + (s.get("tactical_flags") or [])
+            if flags:
+                flagged.add(float(s.get("t_s") or 0))
+            sevs = [f.get("severity", "low") for f in flags if isinstance(f, dict)]
+            info.append({"t_s": s.get("t_s"),
+                         "outcome": s.get("outcome", "unknown"),
+                         "received": s.get("received", "unknown"),
+                         "max_severity": max(sevs, key=lambda v: rank.get(v, 0)) if sevs else ""})
+
+    sr = build_serve_return_map(None, records, flagged, sdir / "serve_return.json", H=H)
+    em = build_error_matrix(None, records, info, sdir / "error_matrix.json", H=H)
+    (sdir / "court_manual.json").write_text(json.dumps({"corners_px": corners}))
+
+    facts = doc.setdefault("facts", {})
+    if any(sr["counts"].values()):
+        doc["serve_return"] = sr
+        facts["serve_return"] = {"counts": sr["counts"], "return_height": sr["return_height"]}
+    if em.get("court_detected") and em.get("players"):
+        doc["error_matrix"] = em
+        n_err = sum(p["errors"] for p in em["players"].values())
+        n_meas = sum(p["measured"] for p in em["players"].values())
+        facts["error_matrix"] = {"worst_cells": em["worst_cells"][:3],
+                                 "errors": n_err, "measured": n_meas}
+    doc["court_calibration"] = "manual"
+    (sdir / "session.json").write_text(json.dumps(doc, indent=2))
+
+    ok = bool(em.get("court_detected") or (sr.get("court_detected") and sr.get("positions")))
+    return {"ok": True, "court_detected": ok,
+            "positions": len(sr.get("positions") or []) + len(em.get("positions") or []),
+            "note": em.get("note") if not ok else ""}
+
+
 def build_analysis_request(form: dict[str, str], roots: list[Path]) -> tuple[list[str], Path, str]:
     """Validate the analyze form and produce (argv, out_dir, display label).
 
@@ -413,6 +465,26 @@ def make_handler(state: AppState):
             if url.path.startswith("/cancel/"):
                 rid = url.path[len("/cancel/"):]
                 return self._json({"cancelled": state.runs.cancel(rid)})
+            if url.path.startswith("/calibrate/"):
+                sid = unquote(url.path[len("/calibrate/"):])
+                ref = state.sessions(max_age_s=0).get(sid)
+                if not ref:
+                    return self._notfound()
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    data = json.loads(self.rfile.read(min(max(length, 0), 1 << 16)) or b"{}")
+                    corners = data.get("corners")
+                    if (not isinstance(corners, list) or len(corners) != 4
+                            or not all(isinstance(c, (list, tuple)) and len(c) == 2
+                                       and all(isinstance(v, (int, float))
+                                               and math.isfinite(v) and 0 <= v < 1e5 for v in c)
+                                       for c in corners)):
+                        raise ValueError("calibration needs 4 [x, y] pixel corners")
+                    result = recalibrate_session(ref.dir, corners)
+                except (ValueError, KeyError, json.JSONDecodeError) as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+                state.invalidate()
+                return self._json(result)
             if url.path != "/analyze":
                 return self._notfound()
             try:

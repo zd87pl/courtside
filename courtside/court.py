@@ -67,10 +67,37 @@ def lane_for_x(x_m: float) -> str:
 
 
 def detect_court_homography(frame_path: Path) -> np.ndarray | None:
-    """Homography image->court meters from the largest white-line quadrilateral."""
+    """Homography image->court meters. Two detectors, cheap first:
+
+    1. largest-white-quadrilateral (works when the whole outer boundary is a
+       clean closed loop - synthetic frames, high fixed cameras);
+    2. line-model fitting (Hough lines + known court geometry, scored by how
+       much of the projected court model lands on white line pixels) - the
+       robust path for real footage where the net band hides the far
+       baseline, players stand on lines, or lighting varies.
+    """
     img = cv2.imread(str(frame_path))
     if img is None:
         return None
+    # bounded working resolution; compose the scale back into the homography
+    scale = 1.0
+    work = img
+    if max(img.shape[:2]) > 1600:
+        scale = 1600.0 / max(img.shape[:2])
+        work = cv2.resize(img, (int(img.shape[1] * scale), int(img.shape[0] * scale)),
+                          interpolation=cv2.INTER_AREA)
+    H = _detect_court_quad(work)
+    if H is None:
+        H = _detect_court_lines(work)
+    if H is None:
+        return None
+    if scale != 1.0:
+        H = H @ np.diag([scale, scale, 1.0])
+    return H
+
+
+def _detect_court_quad(img: np.ndarray) -> np.ndarray | None:
+    """Detector 1: the largest white-line quadrilateral."""
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     # white-ish line mask: low saturation, high value
     mask = cv2.inRange(hsv, (0, 0, 170), (180, 80, 255))
@@ -116,6 +143,162 @@ def detect_court_homography(frame_path: Path) -> np.ndarray | None:
                      dtype=np.float32)
     H, _ = cv2.findHomography(ordered, court, cv2.RANSAC)
     return H
+
+
+# model lines as (x0, y0, x1, y1) in court meters; the support score samples
+# these and checks the projection lands on white line pixels
+_SL = 5.485  # service line distance from its own baseline (23.77/2 - 6.40... no: L/2 - 6.40 = 5.485)
+_MODEL_LINES = (
+    (0, 0, COURT_W, 0), (0, COURT_L, COURT_W, COURT_L),              # baselines
+    (0, 0, 0, COURT_L), (COURT_W, 0, COURT_W, COURT_L),              # doubles sidelines
+    (ALLEY_M, 0, ALLEY_M, COURT_L), (COURT_W - ALLEY_M, 0, COURT_W - ALLEY_M, COURT_L),
+    (ALLEY_M, _SL, COURT_W - ALLEY_M, _SL),                          # far service line
+    (ALLEY_M, COURT_L - _SL, COURT_W - ALLEY_M, COURT_L - _SL),      # near service line
+    (COURT_W / 2, _SL, COURT_W / 2, COURT_L - _SL),                  # center service line
+)
+_MODEL_PTS = np.array([
+    [x0 + (x1 - x0) * t, y0 + (y1 - y0) * t]
+    for x0, y0, x1, y1 in _MODEL_LINES for t in np.linspace(0.02, 0.98, 25)
+], dtype=np.float64)
+
+
+def _cluster_lines(segs: np.ndarray, w: int) -> list[tuple[float, float, float]]:
+    """Merge Hough segments into (theta, rho, total_length) lines."""
+    raw = []
+    for x1, y1, x2, y2 in segs[:, 0]:
+        theta = float(np.arctan2(y2 - y1, x2 - x1)) % np.pi
+        rho = float(-x1 * np.sin(theta) + y1 * np.cos(theta))
+        raw.append((theta, rho, float(np.hypot(x2 - x1, y2 - y1))))
+    clusters: list[list] = []
+    for theta, rho, ln in sorted(raw, key=lambda r: -r[2]):
+        for c in clusters:
+            dt = abs(theta - c[0])
+            dt = min(dt, np.pi - dt)
+            if dt < np.radians(2.5) and abs(rho - c[1]) < 0.012 * w:
+                c[2] += ln
+                break
+        else:
+            clusters.append([theta, rho, ln])
+    return [tuple(c) for c in clusters]
+
+
+def _line_intersect(a: tuple, b: tuple) -> tuple[float, float] | None:
+    """Intersection of two (theta, rho) lines with normal n=(-sin t, cos t)."""
+    n1 = (-np.sin(a[0]), np.cos(a[0]))
+    n2 = (-np.sin(b[0]), np.cos(b[0]))
+    det = n1[0] * n2[1] - n1[1] * n2[0]
+    if abs(det) < 1e-9:
+        return None
+    x = (a[1] * n2[1] - b[1] * n1[1]) / det
+    y = (n1[0] * b[1] - n2[0] * a[1]) / det
+    return x, y
+
+
+def _detect_court_lines(img: np.ndarray) -> np.ndarray | None:
+    """Detector 2: fit the known court geometry to detected line families.
+
+    White-line RIDGE mask (brighter than both side neighbors) -> Hough lines ->
+    split into near-horizontal (baselines/service lines) and steeper
+    (sidelines) families -> try model assignments for pairs from each family
+    -> keep the homography whose full projected court model has the best
+    support on the ridge mask. Needs only 4 visible lines, so it survives the
+    net band hiding the far baseline, players on lines, and worn paint.
+    """
+    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.int16)
+    d = max(3, w // 220)
+    sh = np.roll
+    diff_h = np.minimum(gray - sh(gray, d, axis=1), gray - sh(gray, -d, axis=1))
+    diff_v = np.minimum(gray - sh(gray, d, axis=0), gray - sh(gray, -d, axis=0))
+    ridge = (((diff_h > 18) | (diff_v > 18)) & (gray > 110)).astype(np.uint8)
+    ridge[:d, :] = 0
+    ridge[-d:, :] = 0
+    ridge[:, :d] = 0
+    ridge[:, -d:] = 0
+    mask = ridge * 255
+    segs = cv2.HoughLinesP(mask, 1, np.pi / 360, threshold=60,
+                           minLineLength=int(0.10 * w), maxLineGap=int(0.02 * w))
+    if segs is None or len(segs) < 4:
+        return None
+    lines = _cluster_lines(segs, w)
+    def from_horizontal(t: float) -> float:
+        return min(t, np.pi - t)
+    horiz = sorted([l for l in lines if from_horizontal(l[0]) < np.radians(30)],
+                   key=lambda l: -l[2])[:6]
+    steep = sorted([l for l in lines if from_horizontal(l[0]) >= np.radians(30)],
+                   key=lambda l: -l[2])[:6]
+    if len(horiz) < 2 or len(steep) < 2:
+        return None
+
+    def y_at_center(l: tuple) -> float:
+        # y where the line crosses x = w/2 (horiz family: cos(theta) != 0)
+        return (l[1] + (w / 2) * np.sin(l[0])) / np.cos(l[0])
+
+    def x_at(l: tuple, y: float) -> float:
+        s = np.sin(l[0])
+        if abs(s) < 1e-6:
+            return 1e9
+        return (y * np.cos(l[0]) - l[1]) / s
+
+    support = cv2.dilate(mask, np.ones((7, 7), np.uint8))
+    # (far_y, near_y) model assignments for the upper/lower horizontal pair
+    h_pairs = ((0.0, COURT_L), (_SL, COURT_L), (0.0, COURT_L - _SL), (_SL, COURT_L - _SL))
+    v_pairs = ((0.0, COURT_W), (ALLEY_M, COURT_W - ALLEY_M))
+    best: tuple[float, np.ndarray] | None = None
+    from itertools import combinations
+    for ha, hb in combinations(horiz, 2):
+        top, bot = sorted((ha, hb), key=y_at_center)
+        if y_at_center(bot) - y_at_center(top) < 0.10 * h:
+            continue
+        for va, vb in combinations(steep, 2):
+            ymid = (y_at_center(top) + y_at_center(bot)) / 2
+            left, right = sorted((va, vb), key=lambda l: x_at(l, ymid))
+            if x_at(right, ymid) - x_at(left, ymid) < 0.15 * w:
+                continue
+            for far_y, near_y in h_pairs:
+                for lx, rx in v_pairs:
+                    pts_img = [_line_intersect(top, left), _line_intersect(top, right),
+                               _line_intersect(bot, right), _line_intersect(bot, left)]
+                    if any(p is None for p in pts_img):
+                        continue
+                    P = np.array(pts_img, dtype=np.float64)
+                    if (P[:, 0] < -w).any() or (P[:, 0] > 2 * w).any() \
+                            or (P[:, 1] < -h).any() or (P[:, 1] > 2 * h).any():
+                        continue
+                    model = np.array([[lx, far_y], [rx, far_y], [rx, near_y], [lx, near_y]],
+                                     dtype=np.float32)
+                    try:
+                        Hc = cv2.getPerspectiveTransform(P.astype(np.float32), model)
+                        Hinv = np.linalg.inv(Hc)
+                    except (cv2.error, np.linalg.LinAlgError):
+                        continue
+                    proj = cv2.perspectiveTransform(
+                        _MODEL_PTS.reshape(-1, 1, 2).astype(np.float64), Hinv).reshape(-1, 2)
+                    inside = ((proj[:, 0] >= 0) & (proj[:, 0] < w)
+                              & (proj[:, 1] >= 0) & (proj[:, 1] < h))
+                    if inside.mean() < 0.65:
+                        continue
+                    pi = proj[inside].astype(int)
+                    hit = support[pi[:, 1], pi[:, 0]] > 0
+                    # support on white pixels, small bonus for a centered court
+                    center = cv2.perspectiveTransform(
+                        np.array([[[COURT_W / 2, COURT_L / 2]]], dtype=np.float64), Hinv)[0, 0]
+                    cdist = np.hypot((center[0] - w / 2) / w, (center[1] - h / 2) / h)
+                    score = float(hit.mean()) * float(inside.mean()) - 0.08 * float(cdist)
+                    if best is None or score > best[0]:
+                        best = (score, Hc)
+    if best is None or best[0] < 0.45:
+        return None
+    return best[1]
+
+
+def homography_from_corners(corners_px: list[tuple[float, float]]) -> np.ndarray:
+    """Manual calibration: 4 clicked doubles-court corners, ordered far-left,
+    far-right, near-right, near-left, in source-image pixels -> H image->meters."""
+    src = np.array(corners_px, dtype=np.float32)
+    dst = np.array([[0, 0], [COURT_W, 0], [COURT_W, COURT_L], [0, COURT_L]],
+                   dtype=np.float32)
+    return cv2.getPerspectiveTransform(src, dst)
 
 
 def image_to_court(H: np.ndarray, xy: tuple[float, float]) -> tuple[float, float] | None:
@@ -202,11 +385,39 @@ def _positions_plausible(mapped: list, n_candidates: int) -> tuple[bool, str]:
     return True, ""
 
 
+def _anchor_list(anchor_frame) -> list[Path]:
+    if anchor_frame is None:
+        return []
+    if isinstance(anchor_frame, (list, tuple)):
+        return [Path(a) for a in anchor_frame if a and Path(a).exists()]
+    return [Path(anchor_frame)] if Path(anchor_frame).exists() else []
+
+
+def _resolve_court(anchor_frame, candidates: list[dict[str, Any]],
+                   H: "np.ndarray | None" = None):
+    """(H, mapped, ok, reason) - first anchor whose projected positions pass
+    the plausibility gates wins; a manual/override H skips detection."""
+    Hs = [H] if H is not None else \
+        [h for h in (detect_court_homography(a) for a in _anchor_list(anchor_frame))
+         if h is not None]
+    if not Hs:
+        return None, [], False, "court not found in any anchor frame"
+    last = None
+    for Hc in Hs:
+        mapped = _map_positions(Hc, candidates)
+        ok, reason = _positions_plausible(mapped, len(candidates))
+        if ok:
+            return Hc, mapped, True, ""
+        last = (Hc, mapped, reason)
+    return last[0], last[1], False, last[2]
+
+
 def build_serve_return_map(
-    anchor_frame: Path | None,
+    anchor_frame: "Path | list | None",
     records: list[dict[str, Any]],
     flagged_ts: set[float],
     out_path: Path,
+    H: "np.ndarray | None" = None,
 ) -> dict[str, Any]:
     """Serve & return analysis: player position at contact by court zone, with
     per-zone error rates, plus the return-of-serve contact-height distribution.
@@ -244,18 +455,16 @@ def build_serve_return_map(
                  "claimed (needs ball tracking)."),
     }
 
-    H = detect_court_homography(anchor_frame) if anchor_frame and anchor_frame.exists() else None
+    candidates = [r for r in sr if r.get("ankle_px")]
+    Hr, mapped, ok, reason = _resolve_court(anchor_frame, candidates, H=H)
     doc["court_detected"] = False
-    if H is not None:
-        candidates = [r for r in sr if r.get("ankle_px")]
+    if Hr is not None:
         if not candidates:
             # court found; there is simply nothing to place on it
             doc["court_detected"] = True
             doc["note"] += " No player positions could be measured (no ankle keypoints)."
             out_path.write_text(json.dumps(doc, indent=2))
             return doc
-        mapped = _map_positions(H, candidates)
-        ok, reason = _positions_plausible(mapped, len(candidates))
         if not ok:
             doc["note"] += f" Court positions dropped: {reason}."
         else:
@@ -285,10 +494,11 @@ _BAD_OUTCOMES = ("net", "out_long", "out_wide")
 
 
 def build_error_matrix(
-    anchor_frame: Path | None,
+    anchor_frame: "Path | list | None",
     records: list[dict[str, Any]],
     stroke_info: list[dict[str, Any]],
     out_path: Path,
+    H: "np.ndarray | None" = None,
 ) -> dict[str, Any]:
     """Depth x runway-lane error matrix over ALL measured strokes, per player.
 
@@ -314,19 +524,17 @@ def build_error_matrix(
                  "homography; outcome/received are model judgments; flag and "
                  "contact criteria are measured."),
     }
-    H = detect_court_homography(anchor_frame) if anchor_frame and anchor_frame.exists() else None
-    if H is None:
+    candidates = [r for r in records if r.get("ankle_px")]
+    Hr, mapped, ok, reason = _resolve_court(anchor_frame, candidates, H=H)
+    if Hr is None:
         doc["court_detected"] = False
         out_path.write_text(json.dumps(doc, indent=2))
         return doc
-    candidates = [r for r in records if r.get("ankle_px")]
     if not candidates:
         doc["court_detected"] = True
         doc["note"] += " No player positions could be measured (no ankle keypoints)."
         out_path.write_text(json.dumps(doc, indent=2))
         return doc
-    mapped = _map_positions(H, candidates)
-    ok, reason = _positions_plausible(mapped, len(candidates))
     if not ok:
         doc["court_detected"] = False
         doc["note"] += f" Positions dropped: {reason}."

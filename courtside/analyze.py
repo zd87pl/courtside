@@ -614,9 +614,9 @@ def main(argv: list[str] | None = None) -> int:
                 from .court import build_serve_return_map
                 flagged_ts = {s.t_s for a in analyses for s in a.strokes
                               if s.technique_flags or s.tactical_flags}
-                anchor = out_dir / "court_anchor.jpg"
+                anchors = sorted(out_dir.glob("court_anchor*.jpg"))
                 serve_return = build_serve_return_map(
-                    anchor if anchor.exists() else None,
+                    anchors or None,
                     contact_quality["strokes"], flagged_ts,
                     out_dir / "serve_return.json")
                 if not any(serve_return["counts"].values()):
@@ -649,9 +649,9 @@ def main(argv: list[str] | None = None) -> int:
                                 "received": getattr(s, "received", "unknown"),
                                 "max_severity": _max_sev(s)}
                                for a in analyses for s in a.strokes]
-                anchor = out_dir / "court_anchor.jpg"
+                anchors = sorted(out_dir.glob("court_anchor*.jpg"))
                 error_matrix = build_error_matrix(
-                    anchor if anchor.exists() else None,
+                    anchors or None,
                     contact_quality["strokes"], stroke_info,
                     out_dir / "error_matrix.json")
                 if error_matrix.get("court_detected"):

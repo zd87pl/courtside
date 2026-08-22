@@ -814,6 +814,14 @@ def render_session(ref) -> str:
     if _dget(em, "court_detected") and _dget(em, "players"):
         parts.append(_error_matrix_panel(em))
 
+    # manual court calibration: the guaranteed path to the zone map when
+    # auto-detection fails on this footage - one time, ten seconds, no re-run
+    court_ok = bool(_dget(em, "court_detected")
+                    or (_dget(sr, "court_detected") and (_dget(sr, "positions") or [])))
+    has_measured = bool(_dget(_dget(doc, "contact_quality") or {}, "strokes"))
+    if not court_ok and has_measured and (sdir / "court_anchor.jpg").exists():
+        parts.append(_calibration_card(sid))
+
     def img_url(fp: Path) -> str | None:
         try:
             rel = fp.relative_to(sdir)
@@ -1142,6 +1150,79 @@ def _error_matrix_panel(em: dict) -> str:
     return (f'<div class="card"><h2>Error map &mdash; zone &times; runway</h2>'
             f'<p class="hint">{note}</p>'
             f'<div style="display:flex;gap:26px;flex-wrap:wrap">{dots}{"".join(grids)}{worst}</div></div>')
+
+
+_CAL_ORDER = ("far-left corner", "far-right corner", "near-right corner", "near-left corner")
+
+
+def _calibration_card(sid: str) -> str:
+    """Click the 4 doubles-court corners once -> zone map + error grid rebuild
+    instantly from already-measured data (no re-analysis, no model calls)."""
+    steps = " &rarr; ".join(_CAL_ORDER)
+    return f"""
+<div class="card" id="calibrate">
+  <h2>Calibrate the court &mdash; unlock the zone map</h2>
+  <p class="hint">The court lines couldn't be auto-detected in this footage. Click the four corners of
+     the <b>doubles court</b> in this order: <b>{steps}</b>. One time per camera setup; the error
+     chart and serve/return map rebuild instantly from data already measured.</p>
+  <div style="position:relative;display:inline-block;max-width:100%">
+    <img id="calimg" src="/frames/{_e(sid)}/court_anchor.jpg"
+         style="max-width:100%;display:block;border-radius:8px;cursor:crosshair">
+    <svg id="calovl" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></svg>
+  </div>
+  <div style="display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap">
+    <span class="kicker" id="calstep">Click: {_e(_CAL_ORDER[0])}</span>
+    <span style="flex:1"></span>
+    <button class="btn" type="button" onclick="calReset()">Reset</button>
+    <button class="btn primary" type="button" id="calsave" onclick="calSave()" disabled>Save calibration</button>
+  </div>
+  <p class="note" id="calmsg" style="margin-top:6px"></p>
+</div>
+<script>
+var calPts=[];
+var calOrder={json.dumps(list(_CAL_ORDER))};
+var calImg=document.getElementById('calimg');
+function calDraw(){{
+  var ovl=document.getElementById('calovl');
+  var r=calImg.getBoundingClientRect();
+  var s='';
+  for(var i=0;i<calPts.length;i++){{
+    var x=calPts[i][0]/calImg.naturalWidth*r.width, y=calPts[i][1]/calImg.naturalHeight*r.height;
+    s+='<circle cx="'+x+'" cy="'+y+'" r="6" fill="#e0483e" stroke="#fff" stroke-width="2"/>';
+  }}
+  if(calPts.length>1){{
+    var p=calPts.map(function(c){{return (c[0]/calImg.naturalWidth*r.width)+','+(c[1]/calImg.naturalHeight*r.height);}}).join(' ');
+    s+='<polyline points="'+p+(calPts.length===4?' '+p.split(' ')[0]:'')+'" fill="none" stroke="#e0483e" stroke-width="2" stroke-dasharray="6 4"/>';
+  }}
+  ovl.innerHTML=s;
+  document.getElementById('calstep').textContent=calPts.length<4?('Click: '+calOrder[calPts.length]):'All 4 corners set';
+  document.getElementById('calsave').disabled=calPts.length!==4;
+}}
+calImg.addEventListener('click',function(e){{
+  if(calPts.length>=4)return;
+  var r=calImg.getBoundingClientRect();
+  calPts.push([(e.clientX-r.left)/r.width*calImg.naturalWidth,(e.clientY-r.top)/r.height*calImg.naturalHeight]);
+  calDraw();
+}});
+window.addEventListener('resize',calDraw);
+function calReset(){{calPts=[];document.getElementById('calmsg').textContent='';calDraw();}}
+function calSave(){{
+  document.getElementById('calsave').disabled=true;
+  fetch('/calibrate/'+{json.dumps(sid)},{{method:'POST',headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify({{corners:calPts}})}})
+  .then(function(r){{return r.json();}})
+  .then(function(d){{
+    if(d.ok&&d.court_detected){{location.reload();}}
+    else{{
+      document.getElementById('calmsg').textContent=(d.error||d.note||'Calibration produced implausible positions')+
+        ' - check the corner order (far-left first) and try again.';
+      document.getElementById('calsave').disabled=false;
+    }}
+  }})
+  .catch(function(){{document.getElementById('calmsg').textContent='Request failed - is the app still running?';
+    document.getElementById('calsave').disabled=false;}});
+}}
+</script>"""
 
 
 def _court_panel(cm: dict) -> str:
