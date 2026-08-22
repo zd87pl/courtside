@@ -215,6 +215,15 @@ def assess_session_contacts(video: Path, analyses: list[ClipAnalysis], out_dir: 
                 records.append(rec)
         except Exception:  # noqa: BLE001 - one stroke must not kill the sweep
             continue
+    # extra court-anchor candidates spread across the session: one bad frame
+    # (player on a line, glare) must not cost the whole court analysis. Only
+    # in source-resolution mode, where all anchors share the ankle_px space.
+    if src_res and records:
+        n = len(records)
+        for k, i in enumerate(sorted({n // 4, n // 2, (3 * n) // 4})):
+            if 0 < i < n:
+                extract_still(video, records[i]["t_s"],
+                              out_dir / f"court_anchor_{k + 1}.jpg")
     shutil.rmtree(workdir, ignore_errors=True)
     summary = summarize_contacts(records)
     if not summary:
