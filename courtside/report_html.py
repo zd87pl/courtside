@@ -261,6 +261,20 @@ h1,h2,h3{line-height:1.25}
 .rep h2{font-size:18px;margin-top:24px}
 code{background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-size:13px}
 .muted{color:var(--muted)}
+/* bridge: tokens + classes the live-app panels (webui) style against, so the
+   serve/return and error-map cards render identically in this export */
+:root{--surface:var(--panel);--ink:var(--fg);--ink-2:var(--muted);--border-2:var(--border);
+--crit:#e0483e;--warn:#e2a336;--good:#3fa860;--accent-wash:rgba(59,130,246,.10)}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:16px 0}
+.card h2{margin-top:0}
+.hint{color:var(--muted);font-size:13px;margin:2px 0 12px}
+.kicker{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.tnum{font-variant-numeric:tabular-nums}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--muted);align-items:center}
+.legend .sw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.crumb{color:var(--muted);font-size:12px}
+[data-tip]{cursor:default}
+summary{cursor:pointer;font-weight:650}
 """
 
 
@@ -378,6 +392,20 @@ def render_html(out_dir: Path, session: dict[str, Any]) -> str:
     parts.append(_timeline_svg(session, activity))
     parts.append("</div>")
 
+    # the flagship analyses, same renderers as the live app (deferred import:
+    # webui imports from this module at load time)
+    from .webui import _contact_quality_panel, _error_matrix_panel, _serve_return_panel
+    cq = (session.get("contact_quality") or {}).get("summary") or {}
+    if cq.get("strokes_measured"):
+        parts.append(_contact_quality_panel(cq))
+    sr = session.get("serve_return") or {}
+    counts = sr.get("counts") or {}
+    if isinstance(counts, dict) and any(v for v in counts.values() if isinstance(v, (int, float))):
+        parts.append(_serve_return_panel(sr))
+    em = session.get("error_matrix") or {}
+    if em.get("court_detected") and em.get("players"):
+        parts.append(_error_matrix_panel(em))
+
     # deep-dive coaching moments (slow-mo + biomechanics + cards), when present
     deep = [m for m in (session.get("moments") or []) if isinstance(m, dict)]
     if deep:
@@ -402,31 +430,64 @@ def render_html(out_dir: Path, session: dict[str, Any]) -> str:
             )
         parts.append("</div>")
 
-    # per-clip cards
-    parts.append("<h2>Rallies</h2>")
-    for c in session.get("clips", []):
+    # per-clip cards: rallies with errors/flags first, the rest collapsed so a
+    # 150-rally match stays scannable (and the file stays small - thumbnails
+    # are embedded only for the noteworthy rallies)
+    def _clip_card(c: dict, with_thumbs: bool = True) -> str:
         a = c.get("analysis", {})
-        status = c.get("status", "ok")
-        if status != "ok":
-            parts.append(f'<div class="panel"><b>Clip {c.get("index", "?")}</b> <span class="muted">skipped ({html.escape(str(c.get("error", "")))})</span></div>')
-            continue
-        frames = _clip_frames(out_dir, c)
-        thumbs = frames[:: max(1, len(frames) // 4)][:4] if frames else []
-        parts.append('<div class="panel">')
-        parts.append(
-            f'<b>Clip {c.get("index", "?")}</b> <span class="muted">{a.get("start_s", 0):.1f}-{a.get("end_s", 0):.1f}s - '
-            f'{len(a.get("strokes", []))} strokes - confidence {html.escape(str(a.get("confidence", "")))}</span>'
-        )
+        out = ['<div class="panel">',
+               f'<b>Clip {c.get("index", "?")}</b> <span class="muted">{a.get("start_s", 0):.1f}-{a.get("end_s", 0):.1f}s - '
+               f'{len(a.get("strokes", []))} strokes - confidence {html.escape(str(a.get("confidence", "")))}</span>']
         if a.get("rally_summary"):
-            parts.append(f'<p style="margin:8px 0">{html.escape(a["rally_summary"])}</p>')
-        if thumbs:
-            parts.append('<div class="grid">')
-            for t in thumbs:
-                uri = _img_data_uri(t)
-                if uri:
-                    parts.append(f'<img class="thumb" src="{uri}" alt="frame">')
-            parts.append("</div>")
-        parts.append("</div>")
+            out.append(f'<p style="margin:8px 0">{html.escape(a["rally_summary"])}</p>')
+        if with_thumbs:
+            frames = _clip_frames(out_dir, c)
+            thumbs = frames[:: max(1, len(frames) // 4)][:4] if frames else []
+            if thumbs:
+                out.append('<div class="grid">')
+                for t in thumbs:
+                    uri = _img_data_uri(t)
+                    if uri:
+                        out.append(f'<img class="thumb" src="{uri}" alt="frame">')
+                out.append("</div>")
+        out.append("</div>")
+        return "".join(out)
+
+    def _noteworthy(c: dict) -> bool:
+        for s in (c.get("analysis") or {}).get("strokes", []):
+            if not isinstance(s, dict):
+                continue
+            if s.get("technique_flags") or s.get("tactical_flags") \
+                    or s.get("outcome") in ("net", "out_long", "out_wide"):
+                return True
+        return False
+
+    clips_all = [c for c in session.get("clips", []) if isinstance(c, dict)]
+    ok_clips = [c for c in clips_all if c.get("status", "ok") == "ok"]
+    skipped = [c for c in clips_all if c not in ok_clips]
+    active = [c for c in ok_clips if (c.get("analysis") or {}).get("strokes")]
+    quiet = [c for c in ok_clips if c not in active]
+    notable = [c for c in active if _noteworthy(c)] or active[:8]
+    routine = [c for c in active if c not in notable]
+
+    parts.append("<h2>Rallies</h2>")
+    if len(notable) < len(active):
+        parts.append(f'<div class="muted" style="font-size:13px;margin-bottom:8px">'
+                     f'{len(notable)} of {len(ok_clips)} rallies carry errors or flags - shown first.</div>')
+    parts.extend(_clip_card(c) for c in notable)
+    if routine:
+        parts.append(f'<details><summary>Show {len(routine)} more rallies (no flags or error outcomes)</summary>'
+                     + "".join(_clip_card(c, with_thumbs=False) for c in routine) + "</details>")
+    if quiet or skipped:
+        lines = [f'<div class="muted" style="padding:2px 0">Clip {c.get("index", "?")} - '
+                 f'{(c.get("analysis") or {}).get("start_s", 0):.1f}-'
+                 f'{(c.get("analysis") or {}).get("end_s", 0):.1f}s - no strokes</div>'
+                 for c in quiet]
+        lines += [f'<div class="muted" style="padding:2px 0">Clip {c.get("index", "?")} - '
+                  f'skipped ({html.escape(str(c.get("error", "")))})</div>' for c in skipped]
+        parts.append(f'<details><summary>{len(quiet)} quiet clips (no strokes)'
+                     f'{" - " + str(len(skipped)) + " skipped" if skipped else ""}</summary>'
+                     f'<div class="panel" style="margin-top:8px">{"".join(lines)}</div></details>')
 
     # embedded markdown report
     md_path = out_dir / "session_report.md"
