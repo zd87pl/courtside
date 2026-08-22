@@ -316,3 +316,22 @@ def test_trends_panel_needs_two_real_sessions(tmp_path):
     state = AppState([tmp_path])
     dash = render_dashboard(state)
     assert "Trends" in dash and "<polyline" in dash
+
+
+def test_partial_run_banner_and_quick_not_default(tmp_path):
+    d = _make_session(tmp_path)
+    doc = json.loads((d / "session.json").read_text())
+    doc["facts"]["partial"] = {"rallies_detected": 47, "rallies_analyzed": 3,
+                               "note": "quick"}
+    (d / "session.json").write_text(json.dumps(doc))
+    state = AppState([tmp_path])
+    ref = next(iter(state.sessions().values()))
+    page = render_session(ref)
+    assert "Partial run" in page and "3" in page and "47" in page
+
+    dash = render_dashboard(state)
+    # the quick-test checkbox must NOT be pre-checked: a full-match analysis
+    # is the default (finding: 40-min video analyzed for 40 seconds)
+    import re
+    m = re.search(r'<input type="checkbox" name="quick"[^>]*>', dash)
+    assert m and "checked" not in m.group(0)

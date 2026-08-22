@@ -582,7 +582,7 @@ def render_dashboard(state, error: str | None = None) -> str:
       <select id="model" name="model">{model_opts}</select></div>
     <div style="align-self:end"><label class="f">Options</label>
       <div class="checks" style="padding:9px 0 0">
-        <label><input type="checkbox" name="quick" value="1" checked> quick pass</label>
+        <label><input type="checkbox" name="quick" value="1"> quick test (first 3 rallies only)</label>
         <label><input type="checkbox" name="offline" value="1"> offline</label>
         <label><input type="checkbox" name="dry_run" value="1"> plumbing only</label>
       </div></div>
@@ -596,7 +596,16 @@ def render_dashboard(state, error: str | None = None) -> str:
       </div>
       <div id="cloudrow" style="display:none;max-width:420px">
         <label class="f" for="cloud_model">OpenRouter model</label>
-        <input type="text" id="cloud_model" name="cloud_model" value="qwen/qwen2.5-vl-72b-instruct">
+        <input type="text" id="cloud_model" name="cloud_model" value="qwen/qwen2.5-vl-72b-instruct"
+               list="cloud_models">
+        <datalist id="cloud_models">
+          <option value="qwen/qwen2.5-vl-72b-instruct">fastest / cheapest</option>
+          <option value="google/gemini-2.5-flash">balanced cost + accuracy</option>
+          <option value="google/gemini-2.5-pro">high accuracy</option>
+          <option value="anthropic/claude-sonnet-4.5">high accuracy</option>
+        </datalist>
+        <div class="note" style="margin-top:5px">stronger models call more stroke outcomes
+          (net/long/wide) and read the far player better &mdash; at higher per-match cost</div>
         <div class="note" style="margin-top:5px">needs <code>OPENROUTER_API_KEY</code> set when
           starting <code>courtside-ui</code></div>
       </div>
@@ -755,9 +764,21 @@ def render_session(ref) -> str:
     rt = _dget(rs, "realtime_factor")
     peak = _dget(rs, "peak_gb")
     cloud = _dget(rs, "cloud_equiv_usd")
+    part = _dget(facts, "partial") or {}
+    partial = isinstance(part, dict) and _num(part.get("rallies_detected")) > _num(part.get("rallies_analyzed"))
+    if partial:
+        parts.append(f'<div class="banner err">{_ICONS["bolt"]}<span><b>Partial run:</b> only the first '
+                     f'{int(_num(part.get("rallies_analyzed")))} of {int(_num(part.get("rallies_detected")))} '
+                     f'detected rallies were analyzed (quick test). Re-run without '
+                     f'&ldquo;quick test&rdquo; to cover the whole match.</span></div>')
+
     cov = _dget(facts, "coverage") or {}
     cov_sub = ""
-    if isinstance(cov, dict) and _num(cov.get("downtime_removed_min")) >= 1:
+    if partial:
+        cov_sub = (f'<div class="sub" style="color:var(--crit)">first '
+                   f'{int(_num(part.get("rallies_analyzed")))} of '
+                   f'{int(_num(part.get("rallies_detected")))} rallies</div>')
+    elif isinstance(cov, dict) and _num(cov.get("downtime_removed_min")) >= 1:
         cov_sub = (f'<div class="sub">{_num(cov.get("downtime_removed_min")):.0f} min '
                    f'dead time skipped</div>')
     oc = _dget(facts, "outcomes") or {}
