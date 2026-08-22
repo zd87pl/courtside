@@ -859,30 +859,75 @@ def render_session(ref) -> str:
   <div class="ev">{_e(m["evidence"])}</div></div></div>""")
             parts.append(f'<div class="mgrid">{"".join(cards)}</div>')
 
-    parts.append('<div class="kicker">Rallies<span class="rule"></span></div>')
-    for c in _dget(doc, "clips") or []:
-        if not isinstance(c, dict):
-            continue
+    def _rally_card(c: dict) -> str:
         idx = _e(c.get("index", "?"))
-        a = c.get("analysis")
-        if c.get("status") != "ok" or not isinstance(a, dict):
-            parts.append(f'<div class="card" id="clip-{idx}"><div class="rally"><div>'
-                         f'<div class="t">Clip {idx}</div>'
-                         f'<div class="m">skipped &mdash; {_e(c.get("error", "no analysis"))}</div></div></div></div>')
-            continue
+        a = c["analysis"]
         frames = _clip_frames(sdir, c)
         thumbs = frames[:: max(1, len(frames) // 3)][:3]
         urls = [u for u in (img_url(t) for t in thumbs) if u]
         timg = "".join(f'<img loading="lazy" src="{_e(u)}" alt="frame">' for u in urls)
         n_flags = sum(len(s.get("technique_flags") or []) + len(s.get("tactical_flags") or [])
                       for s in a.get("strokes", []) if isinstance(s, dict))
-        parts.append(f"""
+        return f"""
 <div class="card" id="clip-{idx}"><div class="rally">
   <div class="fr">{timg}</div>
   <div><div class="t">Clip {idx} <span class="m">{_num(a.get("start_s")):.1f}&ndash;{_num(a.get("end_s")):.1f}s</span></div>
     <div class="m">{len(a.get("strokes", []))} strokes &middot; {n_flags} flags &middot; confidence {_e(a.get("confidence", "?"))}</div>
     <p>{_e(a.get("rally_summary", ""))}</p></div>
-</div></div>""")
+</div></div>"""
+
+    def _clip_noteworthy(c: dict) -> bool:
+        a = c.get("analysis") or {}
+        for s in a.get("strokes", []):
+            if not isinstance(s, dict):
+                continue
+            if s.get("technique_flags") or s.get("tactical_flags"):
+                return True
+            if s.get("outcome") in ("net", "out_long", "out_wide"):
+                return True
+        return False
+
+    clips_all = [c for c in (_dget(doc, "clips") or []) if isinstance(c, dict)]
+    ok_clips = [c for c in clips_all if c.get("status") == "ok" and isinstance(c.get("analysis"), dict)]
+    skipped = [c for c in clips_all if c not in ok_clips]
+    with_strokes = [c for c in ok_clips if (c.get("analysis") or {}).get("strokes")]
+    quiet = [c for c in ok_clips if c not in with_strokes]
+    notable = [c for c in with_strokes if _clip_noteworthy(c)]
+    routine = [c for c in with_strokes if c not in notable]
+
+    parts.append('<div class="kicker">Rallies<span class="rule"></span></div>')
+    if notable:
+        parts.append(f'<p class="hint" style="margin:0 0 10px">{len(notable)} of {len(ok_clips)} '
+                     f'rallies carry errors or flags &mdash; shown first.</p>')
+        parts.extend(_rally_card(c) for c in notable)
+    else:
+        parts.extend(_rally_card(c) for c in with_strokes[:8])
+        routine = with_strokes[8:]
+    if routine:
+        parts.append(f'<details class="card"><summary style="cursor:pointer;font-weight:650">'
+                     f'Show {len(routine)} more rallies (no flags or error outcomes)</summary>'
+                     + "".join(_rally_card(c) for c in routine) + "</details>")
+    if quiet or skipped:
+        lines = []
+        for c in quiet:
+            a = c.get("analysis") or {}
+            lines.append(f'<div class="m" id="clip-{_e(c.get("index", "?"))}" style="padding:3px 0">'
+                         f'Clip {_e(c.get("index", "?"))} &middot; '
+                         f'{_num(a.get("start_s")):.1f}&ndash;{_num(a.get("end_s")):.1f}s &middot; '
+                         f'no strokes ({_e(a.get("rally_summary", ""))})</div>')
+        for c in skipped:
+            lines.append(f'<div class="m" id="clip-{_e(c.get("index", "?"))}" style="padding:3px 0">'
+                         f'Clip {_e(c.get("index", "?"))} &middot; skipped &mdash; '
+                         f'{_e(c.get("error", "no analysis"))}</div>')
+        parts.append(f'<details class="card"><summary style="cursor:pointer;font-weight:650">'
+                     f'{len(quiet)} quiet clips (no strokes){" &middot; " + str(len(skipped)) + " skipped" if skipped else ""}'
+                     f'</summary><div style="margin-top:8px">{"".join(lines)}</div></details>')
+    # timeline anchors may point inside a closed <details>: open it on the way
+    parts.append("""<script>
+function openClipTarget(){var h=location.hash;if(!h)return;var el=document.querySelector(h.replace(/([.:])/g,'\\\\$1'));
+if(!el)return;var d=el.closest('details');if(d)d.open=true;el.scrollIntoView({block:'center'});}
+window.addEventListener('hashchange',openClipTarget);openClipTarget();
+</script>""")
 
     md = sdir / "session_report.md"
     if md.exists():
@@ -931,6 +976,142 @@ def _contact_quality_panel(cq: dict) -> str:
 </div>"""
 
 
+_ZONE_BANDS = ((1, 0.0, 2.5), (2, 2.5, 6.40), (3, 6.40, 9.5),
+               (4, 9.5, 12.385), (5, 12.385, 14.4))  # dist-from-net bands
+_RUNWAY_X = {"C-L": (-1.1, 1.37), "B-L": (1.37, 4.113), "A": (4.113, 6.857),
+             "B-R": (6.857, 9.6), "C-R": (9.6, 12.07)}  # near-player x ranges
+
+
+def _court_heat_svg(items: list[dict], cells_by_player: dict | None = None,
+                    width: int = 250) -> str:
+    from .court import COURT_L, COURT_W
+    """The court graphic done properly: an apron so behind-baseline positions
+    have a home, a faint zone x runway grid, cells tinted by error density,
+    and overlapping positions clustered into one counted marker.
+
+    items: [{x_m, y_m, color, rank, halo, tip}] - rank picks the cluster color
+    (higher = shown), halo draws the flagged ring, tips concatenate.
+    """
+    W, L = COURT_W, COURT_L
+    AX, AY = 1.35, 2.7          # lateral / baseline apron in meters
+    S, M = 12, 10
+    vw = int((W + 2 * AX) * S + 2 * M)
+    vh = int((L + 2 * AY) * S + 2 * M)
+
+    def X(x: float) -> float: return M + (x + AX) * S
+    def Y(y: float) -> float: return M + (y + AY) * S
+    net_y = L / 2
+    sngl = (W - 8.23) / 2
+    svl = 6.40
+    s = [f'<svg viewBox="0 0 {vw} {vh}" width="{width}" style="max-width:100%" role="img" aria-label="court map">']
+    # apron: the legal standing room behind the lines
+    s.append(f'<rect x="{M}" y="{M}" width="{vw - 2 * M}" height="{vh - 2 * M}" '
+             f'fill="var(--accent-wash)" opacity="0.45" rx="6"/>')
+
+    # heat cells under the lines
+    if cells_by_player:
+        peak = max((int(_num(c.get("errors"))) for p in cells_by_player.values()
+                    if isinstance(p, dict) for c in (p.get("cells") or {}).values()
+                    if isinstance(c, dict)), default=0)
+        for player, pdoc in cells_by_player.items():
+            if not isinstance(pdoc, dict):
+                continue
+            for key, c in (pdoc.get("cells") or {}).items():
+                errs = int(_num(c.get("errors"))) if isinstance(c, dict) else 0
+                if not errs or not peak:
+                    continue
+                zpart, runway = (str(key).split(":", 1) + [""])[:2]
+                band = next((b for b in _ZONE_BANDS if f"z{b[0]}" == zpart), None)
+                xr = _RUNWAY_X.get(runway)
+                if not band or not xr:
+                    continue
+                d0, d1 = band[1], band[2]
+                if player == "near":
+                    y0, y1 = net_y + d0, min(net_y + d1, L + AY)
+                    x0, x1 = xr
+                else:
+                    y0, y1 = max(net_y - d1, -AY), net_y - d0
+                    x0, x1 = W - xr[1], W - xr[0]
+                pct = int(14 + 60 * errs / peak)
+                s.append(f'<rect x="{X(x0):.1f}" y="{Y(y0):.1f}" width="{(x1 - x0) * S:.1f}" '
+                         f'height="{(y1 - y0) * S:.1f}" '
+                         f'fill="color-mix(in srgb, var(--crit) {pct}%, transparent)"/>')
+
+    # faint zone / runway grid so the dots tie back to the chart
+    grid = 'stroke="var(--ink-2)" stroke-width="0.7" opacity="0.22" stroke-dasharray="3 4"'
+    for _z, d0, _d1 in _ZONE_BANDS[1:]:
+        for y in (net_y - d0, net_y + d0):
+            s.append(f'<line x1="{X(-AX)}" y1="{Y(y):.1f}" x2="{X(W + AX)}" y2="{Y(y):.1f}" {grid}/>')
+    for xb in (1.37, 4.113, 6.857, 9.6):
+        s.append(f'<line x1="{X(xb):.1f}" y1="{Y(-AY)}" x2="{X(xb):.1f}" y2="{Y(L + AY)}" {grid}/>')
+
+    # court proper
+    s.append(f'<rect x="{X(0)}" y="{Y(0)}" width="{W * S}" height="{L * S}" fill="none" '
+             f'stroke="var(--ink-2)" stroke-width="1.6" rx="2"/>')
+    for x0, x1, y0, y1 in ((sngl, sngl, 0, L), (W - sngl, W - sngl, 0, L),
+                           (sngl, W - sngl, net_y - svl, net_y - svl),
+                           (sngl, W - sngl, net_y + svl, net_y + svl),
+                           (W / 2, W / 2, net_y - svl, net_y + svl)):
+        s.append(f'<line x1="{X(x0):.1f}" y1="{Y(y0):.1f}" x2="{X(x1):.1f}" y2="{Y(y1):.1f}" '
+                 f'stroke="var(--ink-2)" stroke-width="1" opacity="0.6"/>')
+    s.append(f'<line x1="{X(0) - 6}" y1="{Y(net_y):.1f}" x2="{X(W) + 6}" y2="{Y(net_y):.1f}" '
+             f'stroke="var(--ink)" stroke-width="2.5"/>')
+
+    # cluster overlapping positions into one counted marker
+    clusters: dict[tuple[int, int], dict] = {}
+    for it in items:
+        if not isinstance(it.get("x_m"), (int, float)) or not isinstance(it.get("y_m"), (int, float)):
+            continue
+        key = (round(it["x_m"] / 0.5), round(it["y_m"] / 0.5))
+        c = clusters.setdefault(key, {"x": 0.0, "y": 0.0, "n": 0, "rank": -1,
+                                      "color": "var(--warn)", "halo": False, "tips": []})
+        c["x"] += it["x_m"]
+        c["y"] += it["y_m"]
+        c["n"] += 1
+        c["halo"] = c["halo"] or bool(it.get("halo"))
+        if it.get("rank", 0) > c["rank"]:
+            c["rank"], c["color"] = it.get("rank", 0), it.get("color", "var(--warn)")
+        if it.get("tip"):
+            c["tips"].append(it["tip"])
+    marks = []
+    for c in clusters.values():
+        r = 6.0 if c["n"] == 1 else min(11.0, 7.0 + c["n"])
+        marks.append({"cx": X(c["x"] / c["n"]), "cy": Y(c["y"] / c["n"]), "r": r, **c})
+    # relax collisions: nudge overlapping cluster markers apart so counts and
+    # colors stay readable when play concentrates in one spot
+    for _pass in range(3):
+        for i in range(len(marks)):
+            for j in range(i + 1, len(marks)):
+                a, b = marks[i], marks[j]
+                dx, dy = b["cx"] - a["cx"], b["cy"] - a["cy"]
+                dist = max(0.001, (dx * dx + dy * dy) ** 0.5)
+                need = a["r"] + b["r"] + 2 - dist
+                if need > 0:
+                    ux, uy = dx / dist, dy / dist
+                    a["cx"] -= ux * need / 2
+                    a["cy"] -= uy * need / 2
+                    b["cx"] += ux * need / 2
+                    b["cy"] += uy * need / 2
+    # draw least-severe first so the worst markers stay on top
+    labels = []
+    for c in sorted(marks, key=lambda m: m["rank"]):
+        cx, cy, r = c["cx"], c["cy"], c["r"]
+        tip = "<br>".join(c["tips"][:4]) + (f"<br>&hellip; +{len(c['tips']) - 4} more"
+                                            if len(c["tips"]) > 4 else "")
+        if c["halo"]:
+            s.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r + 4}" fill="none" '
+                     f'stroke="var(--crit)" stroke-width="1.4" opacity="0.8"/>')
+        s.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}" fill="{c["color"]}" '
+                 f'stroke="var(--surface)" stroke-width="2" data-tip="{_e(tip)}"/>')
+        if c["n"] > 1:
+            labels.append(f'<text x="{cx:.1f}" y="{cy + 3.5:.1f}" text-anchor="middle" '
+                          f'font-size="9.5" font-weight="700" fill="#fff" '
+                          f'style="pointer-events:none">{c["n"]}</text>')
+    s.extend(labels)
+    s.append("</svg>")
+    return "".join(s)
+
+
 def _court_svg_base(W: float, L: float, S: int, M: int) -> tuple[list[str], int, int]:
     """Shared portrait court drawing (outline, singles lines, service boxes, net)."""
     vw, vh = int(W * S + 2 * M), int(L * S + 2 * M)
@@ -959,32 +1140,22 @@ def _serve_return_panel(sr: dict) -> str:
     positions = [p for p in (_dget(sr, "positions") or []) if isinstance(p, dict)]
     rh = _dget(sr, "return_height") or {}
 
-    W, L = 10.97, 23.77
-    S, M = 12, 30
     court = ""
     if positions:
-        s, _, _ = _court_svg_base(W, L, S, M)
-        def X(x: float) -> float: return M + x * S
-        def Y(y: float) -> float: return M + y * S
+        qrank = {"ideal": 1, "acceptable": 2, "poor": 3}
+        items = []
         for p in positions:
-            if not isinstance(p.get("x_m"), (int, float)) or not isinstance(p.get("y_m"), (int, float)):
-                continue  # missing coords would otherwise plot at the (0,0) corner
-            x, y = X(_num(p.get("x_m"))), Y(_num(p.get("y_m")))
-            color = _CQ_COLORS.get(str(p.get("quality", "acceptable")), "var(--warn)")
-            tip = (f"<span class='h'>{_e(p.get('stroke', ''))}</span> ({_e(p.get('player', ''))}) "
-                   f"&middot; {_e(str(p.get('zone', '')).replace('_', ' '))} &middot; t={_num(p.get('t_s')):.1f}s"
-                   + (" &middot; flagged" if p.get("flagged") else ""))
-            if p.get("stroke") == "serve":
-                s.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="7" fill="{color}" '
-                         f'stroke="var(--surface)" stroke-width="2" data-tip="{_e(tip)}"/>')
-            else:  # return: ring marker
-                s.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="7" fill="none" stroke="{color}" '
-                         f'stroke-width="3" data-tip="{_e(tip)}"/>')
-            if p.get("flagged"):
-                s.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="11" fill="none" '
-                         f'stroke="var(--crit)" stroke-width="1.4" opacity="0.8"/>')
-        s.append("</svg>")
-        court = f'<div style="flex:0 0 auto">{"".join(s)}</div>'
+            q = str(p.get("quality", "acceptable"))
+            items.append({
+                "x_m": p.get("x_m"), "y_m": p.get("y_m"),
+                "color": _CQ_COLORS.get(q, "var(--warn)"),
+                "rank": qrank.get(q, 2) + (3 if p.get("flagged") else 0),
+                "halo": bool(p.get("flagged")),
+                "tip": (f"{p.get('stroke', '')} ({p.get('player', '')}) &middot; "
+                        f"{str(p.get('zone', '')).replace('_', ' ')} &middot; t={_num(p.get('t_s')):.1f}s"
+                        + (" &middot; flagged" if p.get("flagged") else "")),
+            })
+        court = f'<div style="flex:0 0 auto">{_court_heat_svg(items)}</div>'
 
     # zone table: worst zones first (by poor+flagged density)
     zsum = _dget(sr, "zones_summary") or {}
@@ -1118,29 +1289,30 @@ def _error_matrix_panel(em: dict) -> str:
     worst = (f'<div style="flex:0 1 280px;min-width:240px"><div class="kicker" style="margin:0 0 6px">'
              f'Worst cells</div>{"".join(rows_w)}</div>') if rows_w else ""
 
-    # dot layer: each error position on the court, colored by its primary cause
+    # court heat layer: cells tinted by error density, error positions clustered
     dots = ""
     positions = [p for p in (_dget(em, "positions") or []) if isinstance(p, dict)]
-    if positions:
-        W, L = 10.97, 23.77
-        S, M = 12, 30
-        s, _, _ = _court_svg_base(W, L, S, M)
+    if positions or players:
+        items = []
         for p in positions:
-            if not isinstance(p.get("x_m"), (int, float)) or not isinstance(p.get("y_m"), (int, float)):
-                continue
             causes = [c for c in (p.get("causes") or []) if isinstance(c, str)]
-            color = ("var(--crit)" if any(c in ("net", "out_long", "out_wide") for c in causes)
+            out = any(c in ("net", "out_long", "out_wide") for c in causes)
+            color = ("var(--crit)" if out
                      else ("var(--warn)" if "flag" in causes else "var(--accent)"))
-            tip = (f"<span class='h'>{p.get('stroke', '')}</span> ({p.get('player', '')}) "
-                   f"&middot; t={_num(p.get('t_s')):.1f}s &middot; {', '.join(c.replace('_', ' ') for c in causes)}")
-            s.append(f'<circle cx="{M + _num(p.get("x_m")) * S:.1f}" cy="{M + _num(p.get("y_m")) * S:.1f}" '
-                     f'r="6" fill="{color}" stroke="var(--surface)" stroke-width="2" data-tip="{_e(tip)}"/>')
-        s.append("</svg>")
+            items.append({
+                "x_m": p.get("x_m"), "y_m": p.get("y_m"), "color": color,
+                "rank": 3 if out else (2 if "flag" in causes else 1), "halo": False,
+                "tip": (f"{p.get('stroke', '')} ({p.get('player', '')}) &middot; "
+                        f"t={_num(p.get('t_s')):.1f}s &middot; "
+                        f"{', '.join(c.replace('_', ' ') for c in causes)}"),
+            })
         legend = ('<div class="legend" style="margin-top:6px">'
                   '<span><span class="sw" style="background:var(--crit)"></span>ball out (AI-called)</span>'
                   '<span><span class="sw" style="background:var(--warn)"></span>flagged form</span>'
-                  '<span><span class="sw" style="background:var(--accent)"></span>poor contact</span></div>')
-        dots = f'<div style="flex:0 0 auto">{"".join(s)}{legend}</div>'
+                  '<span><span class="sw" style="background:var(--accent)"></span>poor contact</span>'
+                  '<span class="muted">shaded cells = error density</span></div>')
+        dots = (f'<div style="flex:0 0 auto">'
+                f'{_court_heat_svg(items, cells_by_player=players)}{legend}</div>')
 
     note = ("The zone (1=net &hellip; 5=back) &times; runway (C-L / B-L / A / B-R / C-R) "
             "error grid coaches track by hand, filled in automatically from video. "
