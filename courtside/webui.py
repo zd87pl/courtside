@@ -1319,7 +1319,7 @@ function poll(){{
     var pct=d.pct||0;document.getElementById('pfill').style.width=Math.max(4,pct)+'%';
     document.getElementById('pctlabel').textContent=(d.phase||'')+' \\u00b7 '+pct+'%';
     setPhases(d.phase);
-    if(d.status==='running'){{setTimeout(poll,1000);return;}}
+    if(d.status==='running'){{document.getElementById('stword').textContent=d.phase||'running';setTimeout(poll,1000);return;}}
     document.getElementById('spin').style.display='none';
     document.getElementById('cancelbtn').style.display='none';
     var w=document.getElementById('stword'),bar=document.getElementById('pbar'),done=document.getElementById('donebar'),a=document.getElementById('openlink');

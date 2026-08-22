@@ -53,3 +53,37 @@ def test_strip_think_variants():
     assert strip_think("<think>a</think>B") == "B"
     assert strip_think("a</think>B") == "B"
     assert strip_think("<think>a") == ""
+
+
+def test_server_vlm_retries_on_truncation(monkeypatch, tmp_path):
+    """finish_reason='length' means the JSON was cut mid-object - retry once
+    with a doubled cap instead of handing truncated output to the parser."""
+    pytest.importorskip("openai")
+    from courtside.vlm import ServerVLM
+
+    vlm = ServerVLM("http://127.0.0.1:9", "fake/model", api_key="x")
+    calls = []
+
+    class _Choice:
+        def __init__(self, text, reason):
+            self.finish_reason = reason
+            self.message = type("M", (), {"content": text})()
+
+    class _Resp:
+        def __init__(self, text, reason):
+            self.choices = [_Choice(text, reason)]
+            self.usage = None
+
+    class _Completions:
+        @staticmethod
+        def create(**req):
+            calls.append(req)
+            if len(calls) == 1:
+                return _Resp('{"start_s": 1.0, "strokes": [', "length")
+            return _Resp('{"ok": true}', "stop")
+
+    vlm.client = type("C", (), {"chat": type("Ch", (), {"completions": _Completions()})()})()
+    text, _ = vlm.generate("p", images=None, max_tokens=1000)
+    assert text == '{"ok": true}'
+    assert len(calls) == 2
+    assert calls[1]["max_tokens"] == 2000

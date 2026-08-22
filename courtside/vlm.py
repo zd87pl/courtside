@@ -203,6 +203,14 @@ class ServerVLM:
                 resp = self.client.chat.completions.create(**req)
             else:
                 raise
+        # Truncation retry: a long rally clip can outgrow any fixed cap, and a
+        # cut-off JSON object fails both parse AND the repair round (finding:
+        # 'invalid JSON' on long clips was max_tokens truncation). One retry
+        # with a doubled cap; the cap is a ceiling, not a spend.
+        if (getattr(resp.choices[0], "finish_reason", None) == "length"
+                and max_tokens < 8000):
+            req["max_tokens"] = min(8000, max_tokens * 2)
+            resp = self.client.chat.completions.create(**req)
         wall = time.perf_counter() - t0
         text = resp.choices[0].message.content or ""
         usage = getattr(resp, "usage", None)
