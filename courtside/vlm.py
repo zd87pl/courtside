@@ -142,6 +142,11 @@ class ServerVLM:
     cloud, never on-device.
     """
 
+    # class-level defaults so instances built without __init__ (tests, pickling)
+    # still generate; __init__ sets the real per-instance values
+    _schema_ok = True
+    _reasoning_ok = False
+
     def __init__(self, base_url: str, model: str, api_key: str | None = None,
                  timeout: float = 180.0):
         import os
@@ -154,6 +159,11 @@ class ServerVLM:
         self.model = model
         self.load_s = 0.0
         self._schema_ok = True  # flips off after a server rejects response_format
+        # Reasoning/thinking hybrids burn the whole budget on internal thought
+        # and return EMPTY content for a perception task (finding: qwen3.8 took
+        # 239s and produced '<empty output>'). On OpenRouter, ask for low
+        # reasoning effort; flips off if a provider rejects the parameter.
+        self._reasoning_ok = "openrouter.ai" in base_url
 
     def ping(self) -> None:
         """Fail fast if the server is unreachable (finding: dead server hangs)."""
@@ -189,28 +199,42 @@ class ServerVLM:
                 "type": "json_schema",
                 "json_schema": {"name": "ClipAnalysis", "strict": True, "schema": json_schema},
             }
+        if self._reasoning_ok:
+            req["extra_body"] = {"reasoning": {"effort": "low"}}
+
+        def _create(r: dict) -> Any:
+            try:
+                return self.client.chat.completions.create(**r)
+            except Exception as e:
+                if getattr(e, "status_code", None) != 400:
+                    raise
+                # Progressive fallback on 400: some providers reject the
+                # reasoning parameter, some reject response_format. Drop the
+                # rejected extra, remember, retry - the Pydantic
+                # validate-and-repair path is the backstop anyway.
+                if "extra_body" in r:
+                    self._reasoning_ok = False
+                    r = dict(r)
+                    r.pop("extra_body")
+                    return _create(r)
+                if "response_format" in r:
+                    self._schema_ok = False
+                    r = dict(r)
+                    r.pop("response_format")
+                    return self.client.chat.completions.create(**r)
+                raise
 
         t0 = time.perf_counter()
-        try:
-            resp = self.client.chat.completions.create(**req)
-        except Exception as e:
-            # Some hosted models (e.g. via OpenRouter) reject response_format.
-            # Fall back to prompt-only JSON once and stop sending the schema -
-            # the Pydantic validate-and-repair path is the backstop anyway.
-            if use_schema and getattr(e, "status_code", None) == 400:
-                self._schema_ok = False
-                req.pop("response_format", None)
-                resp = self.client.chat.completions.create(**req)
-            else:
-                raise
-        # Truncation retry: a long rally clip can outgrow any fixed cap, and a
-        # cut-off JSON object fails both parse AND the repair round (finding:
-        # 'invalid JSON' on long clips was max_tokens truncation). One retry
-        # with a doubled cap; the cap is a ceiling, not a spend.
-        if (getattr(resp.choices[0], "finish_reason", None) == "length"
-                and max_tokens < 8000):
+        resp = _create(req)
+        # One recovery retry for the two cut-short signatures: finish_reason
+        # 'length' (a long rally clip outgrew the cap - the cap is a ceiling,
+        # not a spend) and EMPTY content (a reasoning hybrid spent the whole
+        # budget thinking). Both fail parse AND poison the repair round.
+        choice = resp.choices[0]
+        if (getattr(choice, "finish_reason", None) == "length"
+                or not (choice.message.content or "").strip()) and max_tokens < 8000:
             req["max_tokens"] = min(8000, max_tokens * 2)
-            resp = self.client.chat.completions.create(**req)
+            resp = _create(req)
         wall = time.perf_counter() - t0
         text = resp.choices[0].message.content or ""
         usage = getattr(resp, "usage", None)

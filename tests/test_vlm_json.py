@@ -87,3 +87,70 @@ def test_server_vlm_retries_on_truncation(monkeypatch, tmp_path):
     assert text == '{"ok": true}'
     assert len(calls) == 2
     assert calls[1]["max_tokens"] == 2000
+
+
+def test_server_vlm_retries_on_empty_reasoning_output():
+    """A reasoning hybrid that spends the whole budget thinking returns EMPTY
+    content - retry once with a bigger cap instead of poisoning the repair."""
+    pytest.importorskip("openai")
+    from courtside.vlm import ServerVLM
+
+    vlm = ServerVLM("https://openrouter.ai/api/v1", "fake/model", api_key="x")
+    assert vlm._reasoning_ok  # low reasoning effort requested on OpenRouter
+    calls = []
+
+    class _Choice:
+        def __init__(self, text, reason):
+            self.finish_reason = reason
+            self.message = type("M", (), {"content": text})()
+
+    class _Resp:
+        def __init__(self, text, reason):
+            self.choices = [_Choice(text, reason)]
+            self.usage = None
+
+    class _Completions:
+        @staticmethod
+        def create(**req):
+            calls.append(req)
+            if len(calls) == 1:
+                return _Resp("", "length")   # all tokens burned on reasoning
+            return _Resp('{"ok": 1}', "stop")
+
+    vlm.client = type("C", (), {"chat": type("Ch", (), {"completions": _Completions()})()})()
+    text, _ = vlm.generate("p", images=None, max_tokens=1000)
+    assert text == '{"ok": 1}' and len(calls) == 2
+    assert calls[0]["extra_body"] == {"reasoning": {"effort": "low"}}
+
+
+def test_server_vlm_drops_reasoning_param_on_400():
+    pytest.importorskip("openai")
+    from courtside.vlm import ServerVLM
+
+    vlm = ServerVLM("https://openrouter.ai/api/v1", "fake/model", api_key="x")
+    calls = []
+
+    class _Err(Exception):
+        status_code = 400
+
+    class _Choice:
+        finish_reason = "stop"
+        message = type("M", (), {"content": '{"ok": 1}'})()
+
+    class _Resp:
+        choices = [_Choice()]
+        usage = None
+
+    class _Completions:
+        @staticmethod
+        def create(**req):
+            calls.append(req)
+            if "extra_body" in req:
+                raise _Err("reasoning not supported")
+            return _Resp()
+
+    vlm.client = type("C", (), {"chat": type("Ch", (), {"completions": _Completions()})()})()
+    text, _ = vlm.generate("p", images=None, max_tokens=1000)
+    assert text == '{"ok": 1}'
+    assert len(calls) == 2 and "extra_body" not in calls[1]
+    assert vlm._reasoning_ok is False  # never sent again
