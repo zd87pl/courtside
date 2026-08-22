@@ -290,7 +290,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="auto-zoom analysis to the detected active court region "
                         "of high-res footage (default: auto)")
     p.add_argument("--max-clips", type=int, default=0, help="limit clips (0 = all)")
-    p.add_argument("--max-tokens", type=int, default=1400)
+    # generation CAP, not spend: long rally clips carry 8-12 strokes of JSON
+    # and overflowed the old 1400 cap mid-object (finding: truncated JSON on
+    # long clips); short outputs still bill only what they generate
+    p.add_argument("--max-tokens", type=int, default=2600)
     p.add_argument("--kv-bits", type=int, default=None, help="KV cache quantization bits (e.g. 4 or 8)")
     p.add_argument("--out", type=Path, default=None, help="output dir (default: <video>_courtside)")
     p.add_argument("--dry-run", action="store_true", help="segment + extract frames only, no model")
