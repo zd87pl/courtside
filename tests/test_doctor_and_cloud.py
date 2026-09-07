@@ -101,6 +101,49 @@ def test_servervlm_falls_back_when_schema_rejected(monkeypatch, tmp_path):
     assert "response_format" not in fake.calls[2]
 
 
+@pytest.mark.parametrize("base_url", ["https://openrouter.ai/api/v1", "http://localhost:8080/v1"])
+def test_qwen38_frame_request_and_schema_fallback(base_url, tmp_path):
+    pytest.importorskip("openai")
+    from types import SimpleNamespace
+    from courtside.vlm import ServerVLM
+
+    vlm = ServerVLM(base_url, "qwen/qwen3.8-27b", api_key="test-only")
+    fake = _FakeCompletions()
+    vlm.client = SimpleNamespace(chat=SimpleNamespace(completions=fake))
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"image")
+    text, _ = vlm.generate("analyze frame", images=[frame], max_tokens=1400,
+                           json_schema={"type": "object"})
+    assert text == '{"ok": true}'
+    assert len(fake.calls) == 2  # schema rejected, plain JSON request succeeded
+    for req in fake.calls:
+        assert req["model"] == "qwen/qwen3.8-27b"
+        assert req["max_tokens"] == 1400
+        assert req["messages"][0]["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+        if base_url.startswith("https://openrouter.ai"):
+            assert req["extra_body"] == {"reasoning": {"effort": "none"}}
+        else:
+            assert "extra_body" not in req  # don't send gateway controls to local servers
+
+
+def test_qwen38_rejected_reasoning_control_does_not_restore_thinking():
+    pytest.importorskip("openai")
+    from types import SimpleNamespace
+    from courtside.vlm import ServerVLM
+
+    vlm = ServerVLM("https://openrouter.ai/api/v1", "qwen/qwen3.8-27b", api_key="test-only")
+    calls = []
+    def reject(**req):
+        calls.append(req)
+        raise _Err("reasoning parameter rejected")
+    vlm.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=reject)))
+    with pytest.raises(_Err, match="reasoning parameter rejected"):
+        vlm.generate("p", json_schema={"type": "object"})
+    assert len(calls) == 2
+    assert all(req["extra_body"] == {"reasoning": {"effort": "none"}} for req in calls)
+    assert vlm._reasoning_ok is True
+
+
 # ---------------- OpenRouter form branch ----------------
 
 def _video(tmp_path):
@@ -130,6 +173,7 @@ def test_openrouter_default_model(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     argv, _, _ = build_analysis_request(
         {"video": str(_video(tmp_path)), "use_openrouter": "1"}, [tmp_path])
+    assert DEFAULT_CLOUD_MODEL == "qwen/qwen3.8-27b"
     assert DEFAULT_CLOUD_MODEL in argv
 
 

@@ -1,7 +1,53 @@
 # courtside
 
-Local tennis video analysis on Apple Silicon - a laptop-scale twin of the AceLens VLM
-stage. Pure MLX, nothing leaves the machine.
+Tennis video analysis with an asynchronous mobile API, a local Python pipeline,
+and a separate browser prototype.
+
+## Repository handoff — start here
+
+Read [HANDOFF.md](HANDOFF.md) for the system boundary, deployment checklist,
+review findings, and remaining product work.
+
+| Component | Use | Setup |
+|---|---|---|
+| `api/` | Backend for a mobile app; FastAPI + worker + Postgres + S3 | [Deployment](api/DEPLOYMENT.md), [mobile integration](api/MOBILE_INTEGRATION.md) |
+| `courtside/` | Shared analysis pipeline and local Mac demo | Local quick start below |
+| `cloud/` | Independent Next.js browser prototype, separate users/database | [Cloud README](cloud/README.md) |
+
+The mobile backend runs on your infrastructure using your Postgres, bucket,
+and model-provider credentials. Fly.io automation and an own-infrastructure
+Docker Compose example are included. No infrastructure or credentials from the
+original developer are required. The `cloud/` app is not the mobile API's dashboard.
+
+**Data flow:** the API uploads full videos to your private bucket and sends sampled
+frames to OpenRouter. Reports can contain identifiable frames and short video clips.
+Only local MLX runs have the on-device privacy properties described below.
+
+## API defaults and first run
+
+The mobile API uses **OpenRouter + Qwen3.8 27B** by default:
+`qwen/qwen3.8-27b`. Set your `OPENROUTER_API_KEY`; no local LLM,
+GPU, or Qwen weight download is needed. Your containers handle video processing;
+the model runs at OpenRouter. The API, Fly template, Compose stack, and example
+environment all use this same model. [Model choice and overrides](api/README.md#default-llm).
+
+To try the complete API locally, with Docker installed, run this from the repo root
+in Bash (or export the key through your secret manager):
+
+```bash
+read -r -s -p 'OpenRouter API key: ' OPENROUTER_API_KEY; echo
+export OPENROUTER_API_KEY
+docker compose -f api/docker-compose.yml up --build
+```
+
+Then open http://localhost:8080/docs, create an account using the local admin token,
+and run the [API quick start and smoke test](api/README.md#local-quick-start).
+For your own infrastructure, follow [Deployment](api/DEPLOYMENT.md).
+
+Your mobile backend can start a job with `{"options":{"max_clips":3}}`; omitting
+`options.model` selects Qwen3.8 27B automatically. The queued response includes the
+resolved `options.model`. Full [upload → start → poll → report instructions](api/MOBILE_INTEGRATION.md)
+include credential placement and retries.
 
 ## Product identity
 
@@ -26,11 +72,11 @@ coaching report with monocular-video guardrails.
 Built for: MacBook Pro M5 Max, 128 GB unified memory (614 GB/s). Works on smaller
 machines with the smaller models.
 
-Everything runs **on device** — no video, no frames, and no analysis ever leave the
+In local MLX mode, everything runs **on device** — no video, no frames, and no analysis ever leave the
 machine. That's the point: youth-sports footage has minors on camera, and clubs care.
 `--offline` makes it provable (see [Privacy / offline](#privacy--offline)).
 
-## Quick start
+## Local Mac demo quick start
 
 ```bash
 ./setup.sh
@@ -47,12 +93,32 @@ inspect without a Mac, a GPU, or a model download.
 
 ## Cloud SaaS (Vercel)
 
-A deployable multi-tenant version lives in [`cloud/`](cloud/): coach & player accounts,
+An independent browser prototype lives in [`cloud/`](cloud/): coach & player accounts,
 school teams with invite codes, browser-side segmentation (the video never uploads —
 only sampled frames), OpenRouter analysis, and Postgres persistence. Point Vercel at the
 repo with Root Directory `cloud`, add the Neon integration + `OPENROUTER_API_KEY`, and
 deploy — full steps in [cloud/README.md](cloud/README.md). The local demo below is
 completely independent of it.
+
+## Mobile API (Fly.io)
+
+A third-party iPhone or Android app uploads a match and gets a report back via
+the job API in [`api/`](api/): FastAPI + a worker, its own Postgres and object
+storage, deployed through `api/scripts/deploy.sh` or Docker Compose. The VLM runs at OpenRouter, so the
+service needs no GPU.
+
+```
+POST /v1/uploads          → presigned URL; the phone uploads straight to storage
+POST /v1/jobs/{id}/start  → queued
+GET  /v1/jobs/{id}        → phase, progress, eta   (or take the signed webhook)
+GET  /v1/jobs/{id}/report → session facts + signed report.html
+```
+
+Long matches can take longer than HTTP request limits. Start with
+`options.max_clips: 3` for a preview; latency and provider charges vary by footage,
+model, and options. Account spend figures are estimates, not provider invoices.
+Full setup, mobile client guidance and the Fly deployment are in
+[api/README.md](api/README.md).
 
 ## Web app (local)
 
@@ -94,7 +160,7 @@ segmentation, schema, reports — install and test on any machine. First run of 
 downloads weights from Hugging Face (set `HF_HOME` for external storage); pre-fetch with
 `courtside --prefetch qwen3-vl-32b`.
 
-## Model selection (128 GB M5 Max)
+## Local model selection (128 GB M5 Max)
 
 | key | repo | ~weights | when to use |
 |---|---|---|---|
@@ -196,7 +262,7 @@ as a fallback while debugging local inference or for machines without Apple Sili
 ```bash
 export OPENROUTER_API_KEY=sk-or-...
 courtside match.mp4 --server-url https://openrouter.ai/api/v1 \
-  --server-model qwen/qwen2.5-vl-72b-instruct
+  --server-model qwen/qwen3.8-27b
 ```
 
 The web UI has the same option ("use a cloud model via OpenRouter" on the analyze form;

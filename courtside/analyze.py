@@ -567,7 +567,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"  {args.max_frames}-frame prefill exceeding GPU memory (try --max-frames 12\n"
                     "  --max-side 672, or raise iogpu.wired_limit_mb - see README).\n"
                     "  Cloud fallback: courtside <video> --server-url https://openrouter.ai/api/v1 \\\n"
-                    "    --server-model qwen/qwen2.5-vl-72b-instruct   (needs $OPENROUTER_API_KEY)\n"
+                    "    --server-model qwen/qwen3.8-27b   (needs $OPENROUTER_API_KEY)\n"
                     "  raw model output for each clip was saved to clip_NNN.raw.txt."
                 )
             return 1

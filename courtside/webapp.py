@@ -290,7 +290,7 @@ ALLOWED_FORM_FIELDS = {"video", "model", "quick", "offline", "dry_run",
                        "use_openrouter", "cloud_model"}
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
-DEFAULT_CLOUD_MODEL = "qwen/qwen2.5-vl-72b-instruct"
+DEFAULT_CLOUD_MODEL = "qwen/qwen3.8-27b"
 
 
 def _analyze_argv(form: dict[str, str], out_dir: Path) -> list[str]:

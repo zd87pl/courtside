@@ -100,7 +100,7 @@ export async function ensureSchema(): Promise<void> {
       await s`CREATE INDEX IF NOT EXISTS idx_sessions_owner ON sessions(owner_id, created_at DESC)`;
       await s`CREATE INDEX IF NOT EXISTS idx_sessions_team ON sessions(team_id, created_at DESC)`;
       await s`CREATE INDEX IF NOT EXISTS idx_members_player ON team_members(player_id)`;
-    })();
+    })().catch((error) => { _ready = null; throw error; });
   }
   return _ready;
 }

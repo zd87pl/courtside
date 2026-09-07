@@ -1,0 +1,26 @@
+# Own-infrastructure example. Supply a private Postgres database and S3 bucket.
+# Terminate HTTPS at your reverse proxy/load balancer in front of 127.0.0.1:8080.
+name: courtside
+services:
+  api:
+    image: ${COURTSIDE_IMAGE:-courtside-api:local}
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    command: uvicorn courtside_api.app:app --host 0.0.0.0 --port 8080 --workers 2
+    env_file: .env
+    ports: ["127.0.0.1:8080:8080"]
+    restart: unless-stopped
+  worker:
+    image: ${COURTSIDE_IMAGE:-courtside-api:local}
+    command: python -m courtside_api.worker
+    env_file: .env
+    environment:
+      WORK_DIR: /data/work
+    volumes: ["work:/data"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      disable: true
+volumes:
+  work:

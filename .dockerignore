@@ -1,0 +1,33 @@
+# Keeps the build context small. The repo working tree holds multi-gigabyte
+# match videos and pipeline output dirs that no image ever needs.
+.git
+.github
+.venv
+venv
+.pytest_cache
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+node_modules
+
+*.mp4
+*.mov
+*.mkv
+*.pt
+*_courtside/
+
+api/.env
+api/.env.*
+cloud/.env*
+.DS_Store
+
+# No secrets, local captures, or frontend builds in the remote build context.
+.env
+.env.*
+**/.env
+**/.env.*
+fly-*-credentials.txt
+fly.deploy.*.toml
+cloud/node_modules
+cloud/.next
+*.MOV

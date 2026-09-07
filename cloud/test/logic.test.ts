@@ -3,7 +3,7 @@ import assert from "node:assert";
 import { test } from "node:test";
 import { detectSegments, fixedWindows } from "../lib/client/video.ts";
 import { computeSessionFacts, normalizeFlagCode } from "../lib/courtside/facts.ts";
-import { extractJson, stripThink } from "../lib/courtside/openrouter.ts";
+import { DEFAULT_MODEL, extractJson, generate, stripThink } from "../lib/courtside/openrouter.ts";
 import { ClipAnalysis } from "../lib/courtside/schema.ts";
 import { mdToHtml } from "../lib/md.ts";
 
@@ -48,6 +48,50 @@ test("extractJson: fences, think blocks, trailing prose, empties", () => {
   assert.throws(() => extractJson("   "));
   assert.throws(() => extractJson("no json here"));
   assert.equal(stripThink("a</think>B"), "B");
+});
+
+test("OpenRouter: Qwen3.8 frame analysis keeps non-thinking mode through schema fallback", async (t) => {
+  const oldKey = process.env.OPENROUTER_API_KEY;
+  const oldModel = process.env.OPENROUTER_MODEL;
+  t.after(() => {
+    if (oldKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = oldKey;
+    if (oldModel === undefined) delete process.env.OPENROUTER_MODEL;
+    else process.env.OPENROUTER_MODEL = oldModel;
+  });
+  process.env.OPENROUTER_API_KEY = "test-only";
+  delete process.env.OPENROUTER_MODEL;
+  const bodies: Record<string, unknown>[] = [];
+  t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    assert.equal(url, "https://openrouter.ai/api/v1/chat/completions");
+    const body = JSON.parse(init.body as string);
+    bodies.push(body);
+    if (body.response_format) return new Response("schema rejected", { status: 400 });
+    return Response.json({ choices: [{ message: { content: '{"ok":true}' } }] });
+  });
+  const image = "data:image/jpeg;base64,aW1hZ2U=";
+  assert.equal(await generate("analyze frame", { images: [image], jsonSchema: { type: "object" } }), '{"ok":true}');
+  assert.equal(DEFAULT_MODEL, "qwen/qwen3.8-27b");
+  assert.equal(bodies.length, 2);
+  for (const body of bodies) {
+    assert.equal(body.model, DEFAULT_MODEL);
+    assert.equal(body.max_tokens, 1400);
+    assert.deepEqual(body.reasoning, { effort: "none" });
+    assert.deepEqual(body.messages, [{ role: "user", content: [
+      { type: "text", text: "analyze frame" }, { type: "image_url", image_url: { url: image } },
+    ] }]);
+  }
+  process.env.OPENROUTER_MODEL = "vendor/custom-vision-model";
+  await generate("override");
+  assert.equal(bodies[2].model, "vendor/custom-vision-model");
+  assert.equal(bodies[2].reasoning, undefined);
+
+  delete process.env.OPENROUTER_MODEL;
+  t.mock.method(globalThis, "fetch", async (_url: string, init: RequestInit) => {
+    assert.deepEqual(JSON.parse(init.body as string).reasoning, { effort: "none" });
+    return new Response("reasoning rejected", { status: 400 });
+  });
+  await assert.rejects(generate("p"), /OpenRouter 400: reasoning rejected/);
 });
 
 test("facts: totals, split, synonym normalization", () => {

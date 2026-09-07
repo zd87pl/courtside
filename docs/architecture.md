@@ -1,5 +1,9 @@
 # Architecture: demo vs. production
 
+This is a design comparison with the AceLens system, not a list of services
+implemented or deployed by this repository. For the actual mobile API topology
+and handoff responsibilities, use [HANDOFF.md](../HANDOFF.md).
+
 courtside is a laptop-scale, on-device twin of the AceLens VLM analysis stage. It is
 deliberately built so the parts that carry product risk — the structured schema, the
 prompts, the monocular-video guardrails, and the eval assets — are **identical** to

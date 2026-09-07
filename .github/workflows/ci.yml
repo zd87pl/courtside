@@ -21,4 +21,79 @@ jobs:
       - name: Install (core + dev, no Apple-only mlx-vlm)
         run: pip install -e '.[dev,server]'
       - name: Run tests
-        run: python -m pytest -q
+        run: python -m pytest tests -q
+
+  api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install API deps
+        # The pure-logic suite needs no Postgres, no bucket and no ffmpeg.
+        run: pip install -r api/requirements.txt pytest httpx
+      - name: Run API tests
+        run: python -m pytest api/tests -q
+
+  api-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the deployment image
+        # Catches a broken Dockerfile before `fly deploy` does. Context is the
+        # repo root so the pipeline package is included.
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: api/Dockerfile
+          push: false
+          load: true
+          tags: courtside-ci:test
+      - name: Check image runtime and fresh volume permissions
+        run: |
+          docker run --rm -v courtside-ci-work:/data courtside-ci:test python -c 'import os, pathlib, cv2; from ultralytics import YOLO; assert os.getuid() == 10001; pathlib.Path("/data/work/check").touch(); YOLO("/opt/courtside/yolo11n-pose.pt")'
+          docker volume rm courtside-ci-work
+
+  api-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r api/requirements.txt pytest httpx
+      - run: docker compose -p courtside-handoff -f api/docker-compose.yml up -d --wait postgres minio
+      - run: docker compose -p courtside-handoff -f api/docker-compose.yml run --rm createbucket
+      - name: Real Postgres and S3 contract tests
+        env:
+          COURTSIDE_INTEGRATION: "1"
+          DATABASE_URL: postgres://courtside:courtside@localhost:5432/courtside
+          ADMIN_TOKEN: integration-admin
+          S3_BUCKET: courtside
+          S3_ENDPOINT_URL: http://localhost:9000
+          S3_PUBLIC_ENDPOINT_URL: http://localhost:9000
+          S3_ACCESS_KEY_ID: courtside
+          S3_SECRET_ACCESS_KEY: courtside123
+          S3_FORCE_PATH_STYLE: "true"
+        run: python -m pytest api/integration -q
+      - if: always()
+        run: docker compose -p courtside-handoff -f api/docker-compose.yml down -v
+
+  cloud:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloud
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: cloud/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm audit --audit-level=high

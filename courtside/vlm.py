@@ -146,6 +146,7 @@ class ServerVLM:
     # still generate; __init__ sets the real per-instance values
     _schema_ok = True
     _reasoning_ok = False
+    _disable_thinking = False
 
     def __init__(self, base_url: str, model: str, api_key: str | None = None,
                  timeout: float = 180.0):
@@ -159,11 +160,11 @@ class ServerVLM:
         self.model = model
         self.load_s = 0.0
         self._schema_ok = True  # flips off after a server rejects response_format
-        # Reasoning/thinking hybrids burn the whole budget on internal thought
-        # and return EMPTY content for a perception task (finding: qwen3.8 took
-        # 239s and produced '<empty output>'). On OpenRouter, ask for low
-        # reasoning effort; flips off if a provider rejects the parameter.
+        # Qwen3.8 thinks by default; disable it to reserve the limited output
+        # budget for analysis JSON. Other OpenRouter models retain low effort
+        # with the existing compatibility fallback.
         self._reasoning_ok = "openrouter.ai" in base_url
+        self._disable_thinking = self._reasoning_ok and model == "qwen/qwen3.8-27b"
 
     def ping(self) -> None:
         """Fail fast if the server is unreachable (finding: dead server hangs)."""
@@ -200,7 +201,9 @@ class ServerVLM:
                 "json_schema": {"name": "ClipAnalysis", "strict": True, "schema": json_schema},
             }
         if self._reasoning_ok:
-            req["extra_body"] = {"reasoning": {"effort": "low"}}
+            req["extra_body"] = {
+                "reasoning": {"effort": "none" if self._disable_thinking else "low"},
+            }
 
         def _create(r: dict) -> Any:
             try:
@@ -212,7 +215,9 @@ class ServerVLM:
                 # reasoning parameter, some reject response_format. Drop the
                 # rejected extra, remember, retry - the Pydantic
                 # validate-and-repair path is the backstop anyway.
-                if "extra_body" in r:
+                # Keep Qwen3.8's non-thinking mode even on schema fallback:
+                # dropping it would silently restore the provider's thinking default.
+                if "extra_body" in r and not self._disable_thinking:
                     self._reasoning_ok = False
                     r = dict(r)
                     r.pop("extra_body")

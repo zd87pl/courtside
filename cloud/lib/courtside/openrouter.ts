@@ -5,7 +5,7 @@
  */
 
 const BASE = "https://openrouter.ai/api/v1";
-export const DEFAULT_MODEL = "qwen/qwen2.5-vl-72b-instruct";
+export const DEFAULT_MODEL = "qwen/qwen3.8-27b";
 
 let schemaOk = true; // flips off after a model rejects response_format
 
@@ -77,6 +77,11 @@ export async function generate(prompt: string, opts: GenOpts = {}): Promise<stri
     max_tokens: opts.maxTokens ?? 1400,
     temperature: opts.temperature ?? 0,
   };
+  // Preserve the output budget for results; Qwen3.8 enables thinking by default.
+  // Keep this on schema-fallback retries rather than silently restoring thinking.
+  if (model === "qwen/qwen3.8-27b") {
+    body.reasoning = { effort: "none" };
+  }
   const useSchema = opts.jsonSchema != null && schemaOk;
   if (useSchema) {
     body.response_format = {

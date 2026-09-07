@@ -596,11 +596,11 @@ def render_dashboard(state, error: str | None = None) -> str:
       </div>
       <div id="cloudrow" style="display:none;max-width:420px">
         <label class="f" for="cloud_model">OpenRouter model</label>
-        <input type="text" id="cloud_model" name="cloud_model" value="qwen/qwen2.5-vl-72b-instruct"
+        <input type="text" id="cloud_model" name="cloud_model" value="qwen/qwen3.8-27b"
                list="cloud_models">
         <datalist id="cloud_models">
-          <option value="qwen/qwen2.5-vl-72b-instruct">proven default</option>
-          <option value="qwen/qwen3.8-27b">newer generation, image+video input, ~same cost (unproven on tennis)</option>
+          <option value="qwen/qwen3.8-27b">Qwen3.8 27B (default)</option>
+          <option value="qwen/qwen3-vl-235b-a22b-instruct">Qwen3-VL 235B Instruct</option>
           <option value="google/gemini-2.5-flash">balanced cost + accuracy</option>
           <option value="google/gemini-2.5-pro">high accuracy</option>
           <option value="anthropic/claude-sonnet-4.5">high accuracy</option>

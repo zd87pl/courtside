@@ -1,0 +1,128 @@
+# Courtside mobile API
+
+A phone uploads a tennis video to your private object store; a worker analyzes it
+with the shared Python pipeline and OpenRouter; the app receives structured facts
+and a self-contained HTML report. No GPU is required on the API or worker host.
+
+**Start with [Deployment](DEPLOYMENT.md) and [Mobile integration](MOBILE_INTEGRATION.md).**
+The Next.js `cloud/` app is independent: it does not share API accounts or jobs.
+
+## Default LLM
+
+| Setting | Default / action |
+|---|---|
+| Model provider | OpenRouter, `https://openrouter.ai/api/v1` |
+| Vision-language model | **Qwen3.8 27B** |
+| Exact OpenRouter ID | `qwen/qwen3.8-27b` |
+| Model credential | Set your own `OPENROUTER_API_KEY` with available credits/model access |
+| Client model selection | Omit `options.model`; the service chooses and records the default |
+| GPU or locally hosted LLM | Not required; the image includes CPU video/pose tooling |
+
+Qwen3.8 27B is a dense vision-language model with image and video understanding.
+OpenRouter lists image/video input and JSON-schema structured-output support,
+which fit this pipeline's sampled-frame analysis and structured results.
+[Qwen model card](https://huggingface.co/Qwen/Qwen3.8-27B),
+[OpenRouter model listing](https://openrouter.ai/qwen/qwen3.8-27b).
+
+Qwen3.8 enables thinking by default. For this model, Courtside sends
+`reasoning: {"effort": "none"}` to reserve the bounded output budget for results.
+This setting is retained on schema-fallback retries; a provider that rejects it
+returns an error instead of silently re-enabling thinking.
+[OpenRouter reasoning controls](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
+
+“Best” on a specific tennis dataset still needs evaluation: this repository has
+not established a tennis benchmark winner. Use the included smoke test to verify
+your key/provider route, and review results on representative footage before
+setting quality expectations. Provider prices, availability, and latency can change.
+
+The worker segments the uploaded video and sends sampled JPEG frames plus timing
+information to OpenRouter's chat-completions API; it does not send a raw video as
+a model request. The same selected model also generates the report and optional
+coaching cards. A missing OpenRouter key stops the worker with a clear error;
+there is no silent fallback to a local LLM or a different model.
+
+For a normal deployment, leave these defaults as supplied:
+
+```dotenv
+DEFAULT_MODEL=qwen/qwen3.8-27b
+OPENROUTER_URL=https://openrouter.ai/api/v1
+```
+
+Overrides are optional: an operator can set `DEFAULT_MODEL`, and your backend can
+supply `options.model` for one job. Precedence is **job model → server DEFAULT_MODEL
+→ built-in Qwen3.8 27B default**. Use a model that accepts images. The API saves the
+resolved model when a job is queued, so a later default change does not alter that
+job. It is visible in the start/poll response's `options.model` and in the finished
+session's model metadata. Worker startup logs show the default endpoint/model.
+Local Compose forwards exported model settings; Fly's deploy script imports them
+when explicitly supplied. See deployment instructions for existing installations.
+
+## Local quick start
+
+From the repository root, with Docker Compose installed:
+
+```bash
+# Required for analysis; use a key with credits and access to the default model.
+# Bash example (input hidden); alternatively use your secret manager.
+read -r -s -p 'OpenRouter API key: ' OPENROUTER_API_KEY; echo
+export OPENROUTER_API_KEY
+docker compose -f api/docker-compose.yml up --build
+```
+
+API docs: http://localhost:8080/docs. MinIO console: http://localhost:9001
+(`courtside` / `courtside123`, local demo only). This stack uses persistent named
+volumes and binds ports to loopback. `down` preserves data; `down -v` deletes it.
+
+Create a test account (the response contains its API key once):
+
+```bash
+curl --fail-with-body http://localhost:8080/v1/admin/accounts \
+  -H 'X-Admin-Token: local-admin-token' -H 'Content-Type: application/json' \
+  -d '{"name":"Test Club"}'
+```
+
+Save `api_key` as `COURTSIDE_API_KEY` in your shell, and save `key_id` for revocation.
+Then exercise your deployment with a short MP4 you have permission to use:
+
+```bash
+python3 api/scripts/smoke.py test.mp4             # upload/complete/cancel; no model calls
+python3 api/scripts/smoke.py test.mp4 --analyze   # one clip; uses your provider credits
+```
+
+The first image build downloads CPU Torch, pose weights, and ffmpeg dependencies.
+A worker without `OPENROUTER_API_KEY` deliberately exits; the API still supports
+upload tests. The local stack does not automatically read `api/.env`.
+
+For physical-device development, expose the API and object endpoint through your
+own development network/tunnel and set `S3_PUBLIC_ENDPOINT_URL` to that reachable
+storage URL. `localhost` refers to the phone when used on a phone; the default
+loopback port bindings intentionally need adjustment before LAN access works.
+
+## Contract
+
+```text
+Mobile app → your authenticated backend → POST /v1/uploads
+Mobile app → PUT signed URLs directly to your private S3 bucket
+Your backend → POST /v1/uploads/{id}/complete  (multipart only)
+Your backend → POST /v1/jobs/{id}/start
+Your backend → GET /v1/jobs/{id} → report URLs when succeeded
+```
+
+Keep account API keys on your backend. Each key has access to every job in its
+Courtside account; your backend enforces which signed-in app user owns a job.
+Use `/docs` or `/openapi.json` for request models and the integration guide for
+retry, polling, WebView, and webhook behavior.
+
+## Validation
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e '.[dev,server]' -r api/requirements.txt httpx
+python -m pytest tests api/tests -q
+```
+
+Unit/regression tests cover request validation, worker interruption and cleanup,
+progress, signatures, storage signing, and auth. The separate integration suite
+uses real Postgres and S3; instructions are in the deployment guide. Only a paid
+smoke run checks your provider key, chosen model, and actual footage end to end.

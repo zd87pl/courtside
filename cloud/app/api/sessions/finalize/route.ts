@@ -2,7 +2,7 @@ import { z } from "zod";
 import { ok, route } from "@/lib/api";
 import { requireUser } from "@/lib/auth";
 import { computeSessionFacts } from "@/lib/courtside/facts";
-import { generate, stripThink } from "@/lib/courtside/openrouter";
+import { DEFAULT_MODEL, generate, stripThink } from "@/lib/courtside/openrouter";
 import { LIMITATIONS_MD, reportPrompt } from "@/lib/courtside/prompts";
 import { ClipAnalysis } from "@/lib/courtside/schema";
 import { q } from "@/lib/db";
@@ -50,7 +50,7 @@ export const POST = route(async (req) => {
     video: videoName,
     video_duration_s: durationS,
     backend: "openrouter",
-    model: process.env.OPENROUTER_MODEL || "qwen/qwen2.5-vl-72b-instruct",
+    model: process.env.OPENROUTER_MODEL || DEFAULT_MODEL,
     created_at: new Date().toISOString(),
     facts,
     clips: clips.map((c, i) => ({ index: i, status: "ok", analysis: c.analysis, thumbs: c.thumbs })),
