@@ -127,6 +127,7 @@ signed artifact URLs. `/v1/jobs/{id}/logs` is a support endpoint, not UI copy.
 
 | HTTP | Meaning |
 |---|---|
+| 400 | Invalid upload plan/completion, such as missing multipart size or using single PUT above 5 GiB |
 | 401 | Missing, invalid, or revoked account key |
 | 403 | Disabled account or invalid admin token |
 | 404 | Unknown job, or job belonging to another account |

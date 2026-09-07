@@ -64,8 +64,9 @@ Private raw videos, downloaded `.pt` weights, virtual environments, `.env` files
 credentials, and generated reports are ignored. They are not required to build;
 the image downloads its own pinned dependency versions and bundled pose weights.
 Transfer a reviewed Git commit or source archive of tracked files, not a ZIP of
-the working directory. Include the new `api/` and documentation files in that
-commit. The current handoff work has deliberately not committed or pushed changes.
+the working directory. Include `api/` and all documentation, and record the commit
+ID the receiving team will deploy. Commit any further reviewed changes before
+creating the archive so it contains the intended release.
 
 Preserve `LICENSE`, the dependency manifests/lockfiles, API tests, deployment
 scripts, and all linked docs. Keep real environment values in the receiver's

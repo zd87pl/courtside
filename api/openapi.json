@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Courtside API",
-    "description": "FastAPI surface for the Courtside job API.\n\nShape note, because it drives everything else: a full match is 100+ rallies and\nruns for roughly an hour on real footage, and the source file is often over a\ngigabyte. So there is no synchronous \"POST a video, get a report\" endpoint --\nthere cannot be. The flow is:\n\n    POST /v1/uploads              -> job id + presigned URL(s)\n    PUT  <presigned url>          -> phone uploads straight to object storage\n    POST /v1/jobs/{id}/start      -> queued\n    GET  /v1/jobs/{id}            -> poll phase/progress, or take the webhook\n    GET  /v1/jobs/{id}/report     -> session facts + signed artifact URLs\n\nInteractive docs live at /docs.\n",
+    "description": "FastAPI surface for the Courtside job API.\n\nVideo analysis runs asynchronously on a worker. Processing time depends on the\nfootage, model, and options; upload bytes go directly to object storage. The flow is:\n\n    POST /v1/uploads              -> job id + presigned URL(s)\n    PUT  <presigned url>          -> phone uploads straight to object storage\n    POST /v1/uploads/{id}/complete -> finish multipart uploads only\n    POST /v1/jobs/{id}/start      -> queued\n    GET  /v1/jobs/{id}            -> poll phase/progress, or take the webhook\n    GET  /v1/jobs/{id}/report     -> session facts + signed artifact URLs\n\nInteractive docs live at /docs.\n",
     "version": "0.1.0"
   },
   "paths": {
@@ -210,7 +210,7 @@
           "jobs"
         ],
         "summary": "Poll a job",
-        "description": "Step 3. Poll every few seconds, or supply `webhook_url` and skip polling.",
+        "description": "Step 3. Poll every few seconds and back off in the background.\n\nOptional signed webhooks are best effort; polling is still needed for recovery.",
         "operationId": "get_job_v1_jobs__job_id__get",
         "parameters": [
           {
@@ -1270,7 +1270,7 @@
             "maximum": 1000.0,
             "minimum": 0.0,
             "title": "Max Clips",
-            "description": "Cap the rallies analyzed. 0 = the whole match. Use 3 for a ~3-minute preview; a full match is 100+ clips and can take an hour.",
+            "description": "Cap the clips analyzed. 0 = the whole video. Use 3 for a limited preview; processing time and provider charges vary with footage, model, and options.",
             "default": 0
           },
           "pose": {

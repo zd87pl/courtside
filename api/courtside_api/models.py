@@ -40,8 +40,9 @@ class JobOptions(BaseModel):
     )
     max_clips: int = Field(
         default=0, ge=0, le=1000,
-        description="Cap the rallies analyzed. 0 = the whole match. Use 3 for a "
-                    "~3-minute preview; a full match is 100+ clips and can take an hour.",
+        description="Cap the clips analyzed. 0 = the whole video. Use 3 for a "
+                    "limited preview; processing time and provider charges vary "
+                    "with footage, model, and options.",
     )
     pose: bool = Field(default=True, description="Run YOLO pose overlays and strike-zone measurement.")
     heatmap: bool = Field(default=False, description="Render the court heatmap graphic.")

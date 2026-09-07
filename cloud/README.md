@@ -1,9 +1,9 @@
-# Courtside Cloud (Vercel)
+# Courtside browser prototype
 
 An independent browser proof of concept for Courtside: accounts for **coaches and players**, **teams for
 schools** with invite codes, browser-side video processing, OpenRouter-powered analysis,
-and Postgres persistence. The Python package at the repo root (the on-device demo) is
-untouched and unaffected — this directory is a self-contained Next.js app.
+and Postgres persistence. This directory is a self-contained Next.js app with
+its own accounts and database.
 
 ## Handoff scope
 
@@ -41,12 +41,12 @@ OpenRouter with the same prompts, schema, and validate-and-repair behavior as th
 pipeline, then `/api/sessions/finalize` aggregates facts and writes the coaching report.
 Sessions (analyses + report + keyframe thumbnails) persist in Postgres.
 
-## What's deliberately local-only (for now)
+## Features provided by the Python pipeline
 
 Biomechanics overlays, ghost comparisons, slow-motion clips, and strike-zone measurement
-require pose models and ffmpeg — they run in the on-device demo (`courtside` /
-`courtside-ui` at the repo root). That split is the product story: the cloud tier is the
-team SaaS; the on-device tier is the private, full-fidelity analysis engine.
+require pose models and ffmpeg. They run in the Python CLI and deployed API worker;
+this browser prototype does not implement them. Use the
+[Python API](../api/README.md) to integrate that pipeline into an app.
 
 ## Local development
 

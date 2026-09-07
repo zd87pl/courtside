@@ -1,12 +1,11 @@
 """FastAPI surface for the Courtside job API.
 
-Shape note, because it drives everything else: a full match is 100+ rallies and
-runs for roughly an hour on real footage, and the source file is often over a
-gigabyte. So there is no synchronous "POST a video, get a report" endpoint --
-there cannot be. The flow is:
+Video analysis runs asynchronously on a worker. Processing time depends on the
+footage, model, and options; upload bytes go directly to object storage. The flow is:
 
     POST /v1/uploads              -> job id + presigned URL(s)
     PUT  <presigned url>          -> phone uploads straight to object storage
+    POST /v1/uploads/{id}/complete -> finish multipart uploads only
     POST /v1/jobs/{id}/start      -> queued
     GET  /v1/jobs/{id}            -> poll phase/progress, or take the webhook
     GET  /v1/jobs/{id}/report     -> session facts + signed artifact URLs
@@ -282,7 +281,10 @@ def start_job(job_id: str, body: StartJobRequest,
 @app.get("/v1/jobs/{job_id}", response_model=Job, tags=["jobs"],
          summary="Poll a job")
 def get_job(job_id: str, principal: auth.Principal = auth.AccountDep) -> Job:
-    """Step 3. Poll every few seconds, or supply `webhook_url` and skip polling."""
+    """Step 3. Poll every few seconds and back off in the background.
+
+    Optional signed webhooks are best effort; polling is still needed for recovery.
+    """
     return _job(_load(job_id, principal))
 
 

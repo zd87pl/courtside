@@ -4,7 +4,9 @@ A phone uploads a tennis video to your private object store; a worker analyzes i
 with the shared Python pipeline and OpenRouter; the app receives structured facts
 and a self-contained HTML report. No GPU is required on the API or worker host.
 
-**Start with [Deployment](DEPLOYMENT.md) and [Mobile integration](MOBILE_INTEGRATION.md).**
+**New here? Follow the [repository quick start](../README.md#local-api-quick-start).**
+Use [Deployment](DEPLOYMENT.md) for your infrastructure and
+[Mobile integration](MOBILE_INTEGRATION.md) for the client contract.
 The Next.js `cloud/` app is independent: it does not share API accounts or jobs.
 
 ## Default LLM
@@ -59,7 +61,8 @@ when explicitly supplied. See deployment instructions for existing installations
 
 ## Local quick start
 
-From the repository root, with Docker Compose installed:
+From the repository root, with Docker Compose v2 installed. Use Bash for these
+commands and leave the service terminal running:
 
 ```bash
 # Required for analysis; use a key with credits and access to the default model.
@@ -69,7 +72,8 @@ export OPENROUTER_API_KEY
 docker compose -f api/docker-compose.yml up --build
 ```
 
-API docs: http://localhost:8080/docs. MinIO console: http://localhost:9001
+In a second terminal, wait for `curl --fail http://localhost:8080/readyz` to return
+200. API docs: http://localhost:8080/docs. MinIO console: http://localhost:9001
 (`courtside` / `courtside123`, local demo only). This stack uses persistent named
 volumes and binds ports to loopback. `down` preserves data; `down -v` deletes it.
 
@@ -81,13 +85,26 @@ curl --fail-with-body http://localhost:8080/v1/admin/accounts \
   -d '{"name":"Test Club"}'
 ```
 
-Save `api_key` as `COURTSIDE_API_KEY` in your shell, and save `key_id` for revocation.
-Then exercise your deployment with a short MP4 you have permission to use:
+Save `account_id` and `key_id` for administration/revocation. Set the returned
+`api_key` in the second Bash terminal (it is different from the OpenRouter key):
+
+```bash
+read -r -s -p 'Courtside account API key: ' COURTSIDE_API_KEY; echo
+export COURTSIDE_API_KEY
+```
+
+Then, from the repository root, use Python 3 to exercise the deployment with a
+short MP4 you have permission to process. Replace `test.mp4` with its actual path:
 
 ```bash
 python3 api/scripts/smoke.py test.mp4             # upload/complete/cancel; no model calls
 python3 api/scripts/smoke.py test.mp4 --analyze   # one clip; uses your provider credits
 ```
+
+The smoke script uses only Python's standard library. The analysis check disables
+pose/moments and verifies HTML, JSON, and Markdown downloads. It should end with
+`Analysis and artifact downloads passed.` For a deployed service, add
+`--base-url https://your-api.example` and use an account key from that deployment.
 
 The first image build downloads CPU Torch, pose weights, and ffmpeg dependencies.
 A worker without `OPENROUTER_API_KEY` deliberately exits; the API still supports
@@ -115,10 +132,12 @@ retry, polling, WebView, and webhook behavior.
 
 ## Validation
 
+From the repository root, with Python 3.11+ and ffmpeg installed:
+
 ```bash
-python3 -m venv .venv
+python3.11 -m venv .venv
 . .venv/bin/activate
-pip install -e '.[dev,server]' -r api/requirements.txt httpx
+python -m pip install -e '.[dev,server]' -r api/requirements.txt httpx
 python -m pytest tests api/tests -q
 ```
 

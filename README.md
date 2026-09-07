@@ -1,38 +1,70 @@
-# courtside
+# Courtside
 
-Tennis video analysis with an asynchronous mobile API, a local Python pipeline,
-and a separate browser prototype.
+Courtside turns tennis videos into structured stroke/error analysis and reports
+for coaches. Deploy its asynchronous API on your infrastructure, then connect
+your mobile or web app through your existing backend.
 
-## Repository handoff — start here
+**The default model is Qwen3.8 27B through OpenRouter** (`qwen/qwen3.8-27b`).
+The API and worker need no GPU or local LLM. You supply your own OpenRouter key,
+Postgres database, and private S3-compatible bucket; the local quick start provides
+Postgres and MinIO in Docker.
 
-Read [HANDOFF.md](HANDOFF.md) for the system boundary, deployment checklist,
-review findings, and remaining product work.
+## Choose your starting point
 
-| Component | Use | Setup |
-|---|---|---|
-| `api/` | Backend for a mobile app; FastAPI + worker + Postgres + S3 | [Deployment](api/DEPLOYMENT.md), [mobile integration](api/MOBILE_INTEGRATION.md) |
-| `courtside/` | Shared analysis pipeline and local Mac demo | Local quick start below |
-| `cloud/` | Independent Next.js browser prototype, separate users/database | [Cloud README](cloud/README.md) |
+| Goal | Start here |
+|---|---|
+| Try the API on your computer | [Local API quick start](#local-api-quick-start) |
+| Connect an existing app/backend | [Integration overview](#integrate-with-your-app), then the [full API contract](api/MOBILE_INTEGRATION.md) |
+| Deploy with your own keys and infrastructure | [Deployment guide](api/DEPLOYMENT.md): Fly.io or your own containers |
+| Change or test the Python code | [Developer workflow](#developer-workflow) |
+| Run analysis directly on a Mac or through a model endpoint | [Local pipeline and UI guide](docs/local-development.md) |
+| Explore the separate Next.js browser prototype | [Cloud README](cloud/README.md) |
+| Transfer the repository to another team | [Handoff checklist](HANDOFF.md) |
 
-The mobile backend runs on your infrastructure using your Postgres, bucket,
-and model-provider credentials. Fly.io automation and an own-infrastructure
-Docker Compose example are included. No infrastructure or credentials from the
-original developer are required. The `cloud/` app is not the mobile API's dashboard.
+To inspect the output before installing anything, download/open the
+[sample HTML report](examples/demo_session/report.html) in a browser.
+Its footage and analyses are **illustrative**, not a model-quality benchmark;
+see [sample provenance](examples/README.md#provenance-read-this).
 
-**Data flow:** the API uploads full videos to your private bucket and sends sampled
-frames to OpenRouter. Reports can contain identifiable frames and short video clips.
-Only local MLX runs have the on-device privacy properties described below.
+## How it fits into your project
 
-## API defaults and first run
+Deploy two processes from the same image: the **API** handles accounts, upload
+reservations, and job status; the **worker** claims jobs from Postgres, processes
+videos, and publishes results. The worker must be a long-lived process with
+writable scratch storage. Your app can use the HTTP API from any language.
 
-The mobile API uses **OpenRouter + Qwen3.8 27B** by default:
-`qwen/qwen3.8-27b`. Set your `OPENROUTER_API_KEY`; no local LLM,
-GPU, or Qwen weight download is needed. Your containers handle video processing;
-the model runs at OpenRouter. The API, Fly template, Compose stack, and example
-environment all use this same model. [Model choice and overrides](api/README.md#default-llm).
+```mermaid
+flowchart LR
+  App[Mobile or web app] -->|User session| Backend[Your backend]
+  Backend -->|Account API key| API[Courtside API]
+  App -->|Signed upload and download URLs| Storage[Private S3 bucket]
+  API --> DB[(Postgres)]
+  Worker[Courtside worker] -->|Claim jobs and update progress| DB
+  Storage -->|Source video| Worker
+  Worker -->|Sampled frames and prompts| Model[OpenRouter: Qwen3.8 27B]
+  Worker -->|JSON, Markdown and HTML reports| Storage
+```
 
-To try the complete API locally, with Docker installed, run this from the repo root
-in Bash (or export the key through your secret manager):
+Your backend owns user login, the mapping from users to jobs, authorization,
+notifications, and any billing. Courtside account keys grant access to all jobs
+in that account. Keep them on your backend; give the app only the job information
+and short-lived storage URLs its user is allowed to access.
+
+The phone uploads the full video directly to your bucket. The worker sends sampled
+JPEG frames and prompts to OpenRouter and its inference provider. Reports can
+embed identifiable frames and short clips. Configure retention for both sources
+and results as described in [deployment operations](api/DEPLOYMENT.md#storage-and-retention).
+
+## Local API quick start
+
+Prerequisites: a clone of this repository, Docker with Compose v2, Bash, curl,
+Python 3 for the smoke script, and an OpenRouter key with credits/model access.
+Use a short MP4 you have permission to process. All commands below start from the
+repository root; no Python package installation is needed for this Docker path.
+
+### 1. Start the services
+
+Run in Bash and leave this terminal open:
 
 ```bash
 read -r -s -p 'OpenRouter API key: ' OPENROUTER_API_KEY; echo
@@ -40,307 +72,178 @@ export OPENROUTER_API_KEY
 docker compose -f api/docker-compose.yml up --build
 ```
 
-Then open http://localhost:8080/docs, create an account using the local admin token,
-and run the [API quick start and smoke test](api/README.md#local-quick-start).
-For your own infrastructure, follow [Deployment](api/DEPLOYMENT.md).
+The first build downloads dependencies and the bundled CPU pose model. Qwen runs
+remotely. The local stack reads the exported key; it does **not** automatically
+load `api/.env`. A worker with no key exits with an error.
 
-Your mobile backend can start a job with `{"options":{"max_clips":3}}`; omitting
-`options.model` selects Qwen3.8 27B automatically. The queued response includes the
-resolved `options.model`. Full [upload → start → poll → report instructions](api/MOBILE_INTEGRATION.md)
-include credential placement and retries.
-
-## Product identity
-
-Courtside is an **error-tracking resource for coaches** — the courtside error chart
-(zone 1–5 × runway C-L/B-L/A/B-R/C-R, strike zone, result), filled in automatically
-from match video with the evidence attached. It supports the coach's judgment; it does
-not hand players technique doctrine. Every feature idea gets three tests before it's
-built:
-
-1. **Does it track or explain errors?** We track errors; we are not in the
-   technique-suggestion business.
-2. **Does it make a coach reach for us?** Output is a briefing for the coach's own
-   coaching conversation, never a replacement for it.
-3. **Is it table stakes or differentiation?** Phone-camera capture, dead-time cutting,
-   and shot recognition are parity features — the error-tracking layer is what
-   differentiates.
-
-**Pipeline:** motion-energy rally segmentation → capped frame sampling (~32 frames/clip)
-→ per-clip stroke JSON from a local VLM (schema-validated) → aggregated Markdown
-coaching report with monocular-video guardrails.
-
-Built for: MacBook Pro M5 Max, 128 GB unified memory (614 GB/s). Works on smaller
-machines with the smaller models.
-
-In local MLX mode, everything runs **on device** — no video, no frames, and no analysis ever leave the
-machine. That's the point: youth-sports footage has minors on camera, and clubs care.
-`--offline` makes it provable (see [Privacy / offline](#privacy--offline)).
-
-## Local Mac demo quick start
+In a second terminal, from the repository root, wait for readiness to return 200:
 
 ```bash
-./setup.sh
+curl --fail http://localhost:8080/readyz
 ```
 
-One interactive command: it detects your platform and RAM, installs ffmpeg + a venv +
-the package with the right extras, helps you pick and pre-fetch a model, and then
-launches either the **instant sample demo** (no model, always works) or a live run on
-your own footage. Safe to re-run.
+Open [interactive API docs](http://localhost:8080/docs) to explore the endpoints.
+Readiness checks Postgres and storage; the analysis smoke test below checks the
+worker and model provider.
 
-Prefer to see output before installing anything? Open
-[`examples/demo_session/report.html`](examples/demo_session/) — a complete run you can
-inspect without a Mac, a GPU, or a model download.
-
-## Cloud SaaS (Vercel)
-
-An independent browser prototype lives in [`cloud/`](cloud/): coach & player accounts,
-school teams with invite codes, browser-side segmentation (the video never uploads —
-only sampled frames), OpenRouter analysis, and Postgres persistence. Point Vercel at the
-repo with Root Directory `cloud`, add the Neon integration + `OPENROUTER_API_KEY`, and
-deploy — full steps in [cloud/README.md](cloud/README.md). The local demo below is
-completely independent of it.
-
-## Mobile API (Fly.io)
-
-A third-party iPhone or Android app uploads a match and gets a report back via
-the job API in [`api/`](api/): FastAPI + a worker, its own Postgres and object
-storage, deployed through `api/scripts/deploy.sh` or Docker Compose. The VLM runs at OpenRouter, so the
-service needs no GPU.
-
-```
-POST /v1/uploads          → presigned URL; the phone uploads straight to storage
-POST /v1/jobs/{id}/start  → queued
-GET  /v1/jobs/{id}        → phase, progress, eta   (or take the signed webhook)
-GET  /v1/jobs/{id}/report → session facts + signed report.html
-```
-
-Long matches can take longer than HTTP request limits. Start with
-`options.max_clips: 3` for a preview; latency and provider charges vary by footage,
-model, and options. Account spend figures are estimates, not provider invoices.
-Full setup, mobile client guidance and the Fly deployment are in
-[api/README.md](api/README.md).
-
-## Web app (local)
+### 2. Create an account and save its key
 
 ```bash
-courtside-ui        # serves http://127.0.0.1:8799 (localhost only)
+curl --fail-with-body http://localhost:8080/v1/admin/accounts \
+  -H 'X-Admin-Token: local-admin-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Integration test"}'
 ```
 
-A SaaS-style dashboard over the same pipeline: an overview hero with the on-device /
-faster-than-realtime / $0-cloud story, **analyze from the browser** (pick a workspace
-video, paste a path **or a YouTube URL**, choose a model), a **live phased progress view**
-(Download → Segment → Extract → Analyze → Report) with a **Cancel** button and a streaming
-log, and a rich per-session view — rally/stroke timeline with hover details, flagged-moments
-keyframe gallery, per-rally cards, and the coaching report. Light and dark themes. One
-analysis runs at a time (one laptop, one model). URL downloads fetch over the network via
-yt-dlp; the analysis itself still runs entirely on-device (`--offline` refuses URLs).
-
-The speed number is **honest end-to-end wall clock** — it includes model load, frame
-extraction, inference, and the report pass, not just inference — so what the report claims
-matches a stopwatch.
-
-It is stdlib-only and binds to `127.0.0.1` — the "backend" is your laptop, nothing is
-uploaded anywhere. `Export report` produces the self-contained `report.html` for sharing.
+The JSON response contains `account_id`, `key_id`, and `api_key`. Save the IDs for
+administration and revocation; the plaintext `api_key` is returned only once.
+In the second terminal, set that account key for the smoke script:
 
 ```bash
-courtside-ui --root ~/tennis-videos   # scan a different workspace (repeatable)
+read -r -s -p 'Courtside account API key: ' COURTSIDE_API_KEY; echo
+export COURTSIDE_API_KEY
 ```
 
-## Setup (manual)
+`OPENROUTER_API_KEY` pays for model calls and belongs to the service operator.
+`COURTSIDE_API_KEY` authenticates your backend to Courtside. They are different keys.
+The admin token shown above is for this local demo only.
+
+### 3. Test upload, then analysis
+
+Replace `test.mp4` with the path to your short test video:
 
 ```bash
-brew install ffmpeg
-cd courtside
-python3.11 -m venv .venv && source .venv/bin/activate   # 3.11+ (matches requires-python)
-pip install -e '.[local]'   # Apple Silicon; core-only off-Mac: pip install -e '.[server]'
+# Upload, complete multipart upload, then cancel; no model calls.
+python3 api/scripts/smoke.py test.mp4
+
+# Analyze one clip and verify the generated artifact downloads; uses provider credits.
+python3 api/scripts/smoke.py test.mp4 --analyze
 ```
 
-`mlx-vlm` is an Apple-Silicon-only extra (`[local]`), so the model-free parts —
-segmentation, schema, reports — install and test on any machine. First run of a model
-downloads weights from Hugging Face (set `HF_HOME` for external storage); pre-fetch with
-`courtside --prefetch qwen3-vl-32b`.
+The second command should finish with `Analysis and artifact downloads passed.`
+It disables pose/moment generation for this initial check. For another deployment,
+add `--base-url https://your-api.example` and use an account key from that deployment.
 
-## Local model selection (128 GB M5 Max)
+### 4. Stop or troubleshoot
 
-| key | repo | ~weights | when to use |
-|---|---|---|---|
-| `qwen3-vl-32b` **(default)** | mlx-community/Qwen3-VL-32B-Instruct-8bit | ~35 GB | best quality/headroom balance |
-| `qwen3-vl-32b-thinking` | ...-Thinking-8bit | ~35 GB | harder tactical reasoning, slower |
-| `qwen3-vl-30b-a3b` | Qwen3-VL-30B-A3B-Instruct-8bit | ~32 GB | MoE, fastest decode, iteration |
-| `qwen3-vl-8b` | Qwen3-VL-8B-Instruct-8bit | ~9 GB | smoke tests (video ≈ Qwen2.5-VL-72B class) |
-| `glm-4.6v-flash` | lmstudio-community/GLM-4.6V-Flash-MLX-8bit | ~10 GB | second-opinion architecture |
-| `qwen3-vl-235b` | Qwen3-VL-235B-A22B-Instruct-3bit | ~97 GB | stretch flagship, see below |
+`docker compose -f api/docker-compose.yml down` stops the stack and preserves its
+named volumes. Adding `-v` deletes local database, object-store, and scratch data.
 
-Any HF repo or local path also works: `--model mlx-community/...`.
-
-### Running the 235B flagship on 128 GB
-
-3-bit fits; 4-bit does not. macOS caps GPU-wired memory at ~75% of RAM by default -
-raise it for the session, and quantize the KV cache:
-
-```bash
-sudo sysctl iogpu.wired_limit_mb=117760     # ~115 GB; resets on reboot
-courtside match.mp4 --model qwen3-vl-235b --kv-bits 4 --max-frames 24 --max-side 672
-```
-
-If the exact 3-bit mlx-community quant isn't published, convert locally:
-`python -m mlx_vlm.convert --hf-path Qwen/Qwen3-VL-235B-A22B-Instruct -q --q-bits 3`.
-
-## Usage
-
-```bash
-# plumbing check - segmentation + frame extraction only, no model load
-courtside match.mp4 --dry-run
-
-# full run with defaults
-courtside match.mp4
-
-# analyze straight from YouTube (needs the [youtube] extra; downloads, then runs locally)
-courtside "https://youtube.com/watch?v=..." --max-clips 3
-
-# quick pass: first 3 clips, small model, tokens streaming live
-courtside match.mp4 --model qwen3-vl-8b --max-clips 3 --stream
-
-# re-render the report from a finished run - ZERO model calls (instant demo)
-courtside --from-dir match_courtside
-
-# resume a crashed/interrupted run, skipping clips already analyzed
-courtside match.mp4 --resume
-
-# compare models on your own footage (persist outputs for a side-by-side)
-courtside-bench match.mp4 --models qwen3-vl-8b qwen3-vl-30b-a3b qwen3-vl-32b --out bench_out
-```
-
-Outputs land in `<video>_courtside/`: per-clip frames + `clip_NNN.json`, a
-`session.json` envelope (provenance + run metrics + every clip's analysis),
-`session_report.md`, and a self-contained **`report.html`** — the visual report with a
-flagged-moments keyframe gallery, a rally/stroke timeline, and an on-device cost line.
-
-### Reliability & live-demo notes
-
-The pipeline is built to survive a stage: one bad clip is skipped (never aborts the run),
-the report is always written from whatever succeeded, `--resume` continues a crashed run,
-and `--from-dir` re-renders instantly with no model. Missing ffmpeg, a cold model cache,
-or too little RAM are caught up front with a clear message instead of a late traceback.
-
-**Demo runbook:** rehearse the night before (that run becomes your cached asset); on the
-day, run airplane-mode with `--offline`, analyze 1-2 clips live on `qwen3-vl-30b-a3b`
-(fastest decode) with `--stream`, then open the pre-baked `report.html`.
-
-### Privacy / offline
-
-`--offline` sets `HF_HUB_OFFLINE=1` so the run cannot touch the network (weights must be
-pre-cached via `courtside --prefetch <model>`). The report is stamped
-*"Processed entirely on this device — network not used."* Do the live demo with Wi-Fi off.
-
-### Server mode (constrained decoding)
-
-The in-process path validates + repairs JSON with Pydantic. Against an OpenAI-compatible
-server (mlx-vlm's server, or LM Studio serving the same MLX models) courtside also sends a
-strict-mode-compatible JSON schema for constrained decoding, so servers that honor it emit
-schema-valid output directly:
-
-```bash
-# terminal 1
-mlx_vlm.server --model mlx-community/Qwen3-VL-32B-Instruct-8bit --port 8080
-
-# terminal 2
-courtside match.mp4 --server-url http://localhost:8080/v1 \
-  --server-model mlx-community/Qwen3-VL-32B-Instruct-8bit
-```
-
-courtside pings the server before starting and uses a request timeout, so an unreachable
-endpoint fails fast instead of hanging. (Not every server enforces strict mode; if one
-rejects the schema with a 400 courtside retries without it — the Pydantic
-validate-and-repair path is always the backstop.)
-
-### Cloud fallback via OpenRouter
-
-The same server backend works against [OpenRouter](https://openrouter.ai), which is handy
-as a fallback while debugging local inference or for machines without Apple Silicon:
-
-```bash
-export OPENROUTER_API_KEY=sk-or-...
-courtside match.mp4 --server-url https://openrouter.ai/api/v1 \
-  --server-model qwen/qwen3.8-27b
-```
-
-The web UI has the same option ("use a cloud model via OpenRouter" on the analyze form;
-start `courtside-ui` with `OPENROUTER_API_KEY` set). **Be aware this inverts the privacy
-story: frames are uploaded to the API for that run.** Cloud runs are labeled accordingly —
-the report says "frames uploaded" and never claims $0 / 0-bytes.
-
-## Coaching moments (slow-mo + biomechanics + deep dives)
-
-For the top flagged strokes (default 6, `--moments N`, `0` disables) each run now produces
-a **coaching moment**: a slow-motion error clip, and — with the `[pose]` extra installed —
-an on-device biomechanics layer:
-
-- **skeleton overlay + joint angles** at contact (elbow/knee angles, hip–shoulder
-  separation, stance width, contact height), drawn on the keyframe and on an annotated
-  slow-mo video. Angles are **2D image-plane estimates** (labeled as such — consistent
-  with the monocular-video guardrails; never force or weight-transfer claims)
-- **contact-frame refinement**: the stroke timestamp is snapped to the wrist-speed peak
-- **ghost comparison**: the player's own best unflagged same-type stroke from the session,
-  normalized and overlaid as a ghost skeleton ("this vs your best forehand")
-- **a deep-dive coaching card** from a second, focused VLM pass that reads the measured
-  angles as structured JSON (the production AceLens pattern): what happened, why it
-  matters, the one correction, a measurable target, and a drill
-
-```bash
-pip install -e '.[pose]'      # ultralytics + torch (MPS on Apple Silicon)
-courtside match.mp4           # moments are built automatically after clip analysis
-```
-
-Everything degrades gracefully: no `[pose]` extra → slow-mo + cards without overlays; no
-VLM card → assets without prose; a failed moment never kills the run. First pose use
-downloads a ~6 MB YOLO pose model (pre-fetch it before an `--offline` demo).
-
-### courtside-doctor
-
-If local generation misbehaves (e.g. `<empty output>`), run:
-
-```bash
-courtside-doctor                      # synthetic test frame
-courtside-doctor --video match.mp4    # real frames from your footage
-```
-
-It drives mlx-vlm's canonical generate path at 1 / 8 / 32 frames plus the real courtside
-prompt, prints tokens/finish-reason per step, and ends with a specific diagnosis
-(generation-stack regression → pin `mlx-vlm==0.6.3`; frame-count/memory ceiling →
-lower `--max-frames`/`--max-side` or raise the GPU wired limit; prompt-specific → report it).
-
-## Tuning knobs
-
-- `--fps` / `--max-frames` (default 4.0 / 32): the research sweet spot - too few frames
-  misses contacts, every-frame hurts. `fps` auto-reduces so long clips still cap at 32.
-- `--max-side` (default 784 px): controls vision tokens per frame (~(side/28)² · AR for
-  Qwen-class). Drop to 672 to trade detail for speed/memory.
-- `--segment fixed --window 20` if the motion detector misfires on your footage
-  (moving camera, indoor lighting), or `--segment file --segments-file segs.json`
-  with `[[start_s, end_s], ...]` for hand-picked rallies.
-- `--kv-bits 8` (or 4) quantizes the KV cache - useful for the 235B or very long clips.
-
-## What this demo deliberately does NOT do
-
-Per the CalTennis findings, single-camera video cannot reliably measure absolute
-depth/distance, foot contact, weight transfer, or forces. The prompts forbid those
-claims and every report carries an auto-appended limitations section. Stroke counts
-are lower bounds (sampling at 4 fps can miss contacts) - the SaaS pipeline replaces
-this with a dedicated event-spotting model (F3ED) precisely because VLMs can't count
-rally events reliably.
-
-## Mapping back to AceLens
-
-The clip JSON schema here is intentionally a subset of the AceLens `Rally/Stroke/Error`
-shared types, so prompts and eval assets transfer directly. The full story — which stages
-transfer as-is vs. get swapped at scale, and why — is in
-**[docs/architecture.md](docs/architecture.md)** (with a diagram):
-
-| courtside (demo) | AceLens (production) |
+| Symptom | Check |
 |---|---|
-| motion-energy segmentation | rally/event detection worker (F3ED) |
-| ffmpeg frame sampling | ingest/preprocess worker on RunPod |
-| VLM sees raw frames | VLM sees structured JSON from CV stack + keyframes |
-| Pydantic validate + 1 retry | server-side constrained decoding |
-| session_report.md + report.html | coach dashboard report + drill refs |
+| Readiness fails | `docker compose -f api/docker-compose.yml logs api postgres minio createbucket` |
+| Job stays queued or the worker exits | `docker compose -f api/docker-compose.yml logs worker`; confirm the key was exported in the startup terminal |
+| Analysis fails | Poll the job for `error_code`, inspect worker logs, and check provider credits/model access |
+| A physical phone cannot upload | Local ports bind to loopback. Configure reachable API/storage addresses and `S3_PUBLIC_ENDPOINT_URL`; see [local networking](api/README.md#local-quick-start) |
+
+## Integrate with your app
+
+Backend API requests use `Authorization: Bearer <account-api-key>`. Administrative
+requests use `X-Admin-Token`. Storage requests use the signed URL's credentials;
+**do not forward either API authentication header to storage**.
+
+| Step | Caller and request | Result |
+|---|---|---|
+| Reserve | Backend: `POST /v1/uploads` | Persist `job_id` and return the permitted upload plan to the app |
+| Upload | App: `PUT` raw bytes to the signed URL(s) | For multipart, save each part's `ETag` |
+| Complete | Backend: `POST /v1/uploads/{job_id}/complete` | Required for multipart only; does not start analysis |
+| Start | Backend: `POST /v1/jobs/{job_id}/start` | Returns a queued job immediately |
+| Poll | Backend: `GET /v1/jobs/{job_id}` | Status, phase, progress, and an optional ETA |
+| Get results | Backend: `GET /v1/jobs/{job_id}/report` | Summary and signed HTML, JSON, and Markdown URLs |
+| Cancel | Backend: `POST /v1/jobs/{job_id}/cancel` | Requests cancellation; poll until terminal |
+
+For a small integration preview, send this start body:
+
+```json
+{"options":{"max_clips":3,"pose":false,"moments":0}}
+```
+
+Omit `options.model` to use Qwen3.8 27B. The API records the resolved model in
+`options.model` when it queues the job. Operators can change `DEFAULT_MODEL`, and
+a backend can override the model for one job; see [model configuration](api/README.md#default-llm).
+Default analysis options process the whole video (`max_clips: 0`) with pose enabled
+and up to six moments, so use a limited preview while integrating.
+
+Poll every 3–5 seconds in the foreground and back off in the background. Handle
+`succeeded`, `failed`, `cancelled`, and `expired` as terminal states. Fetch fresh
+report URLs when they expire. Webhooks are optional, signed, and best effort;
+polling is needed for recovery. Upload reservations are not idempotent, so persist
+the returned job ID and follow the documented retry rules.
+
+The [mobile integration contract](api/MOBILE_INTEGRATION.md) covers request bodies,
+chunking, errors, retries, WebViews, and webhook verification. Use the checked-in
+[OpenAPI schema](api/openapi.json) to generate a client, or fetch `/openapi.json`
+from the deployed version. No mobile SDK or end-user authentication service is included.
+
+## Deploy on your infrastructure
+
+Use the [deployment guide](api/DEPLOYMENT.md) for prerequisites, exact commands,
+configuration, and acceptance checks:
+
+- **Fly.io:** the supplied script provisions the app/storage/worker volume and uses
+  your supplied Postgres database by default. Review the offline `--dry-run` first.
+- **Your containers:** supply Postgres, a private S3-compatible bucket, secrets,
+  HTTPS routing, and worker scratch; use `api/compose.production.yml` or the same
+  image on your container platform.
+
+Start from [the environment template](api/.env.example). Keep provider/storage/admin
+secrets in the deployment and account keys in your backend. Configure backups,
+bucket lifecycle, rate limits, and a provider budget, then run the smoke tests through
+your public HTTPS endpoint. See the [handoff checklist](HANDOFF.md) and
+[remaining production work](docs/review.md#recommended-next-work).
+
+## Developer workflow
+
+From the repository root, use Python 3.11+ and install ffmpeg for video-processing
+tests (`brew install ffmpeg` on macOS or `sudo apt-get install ffmpeg` on Debian/Ubuntu).
+Then install development dependencies:
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev,server]' -r api/requirements.txt httpx
+python -m pytest tests api/tests -q
+```
+
+These tests need no real provider key, database, bucket, or local LLM. For the real
+Postgres/S3 contract, use the [disposable integration stack](api/DEPLOYMENT.md#local-integration-tests-no-provider-charges).
+Use Docker Compose above to run the API and worker; after editing Python source,
+rebuild/restart the services with the same `up --build` command.
+
+When changing request/response models or endpoint descriptions, regenerate and
+review the checked-in contract:
+
+```bash
+python api/scripts/export_openapi.py > api/openapi.json
+git diff --check
+```
+
+| Directory | What to change here |
+|---|---|
+| `api/courtside_api/` | HTTP routes, auth, queue, worker, storage, and API configuration |
+| `courtside/` | Segmentation, sampled-frame analysis, prompts/schema, and report generation |
+| `api/tests/`, `tests/` | API regressions and shared pipeline tests |
+| `api/integration/` | Tests against disposable Postgres and S3 services |
+| `api/scripts/` | Deployment, container startup, contract export, and smoke testing |
+| `cloud/` | Independent Next.js prototype with its own accounts/database; see its [development commands](cloud/README.md#local-development) |
+
+Python dependency ranges are in `pyproject.toml` and `api/requirements.txt`;
+container builds also apply `api/constraints.txt`. The browser app has its own
+lockfile. CI checks Python tests, the API image, DB/storage integration, and the
+browser build/tests. Schema bootstrap creates the initial tables; future table
+changes need an explicit migration plan.
+
+## Analysis limits and licensing
+
+The current pipeline uses motion-based segmentation and sampled frames. Stroke
+counts are estimates; reports may be partial when clips fail. Single-camera pose
+measurements are 2D estimates, and the model should not be treated as a source of
+physical force, depth, or weight-transfer measurements. Review results with a coach.
+Latency, provider charges, and quality depend on footage and options; no comparative
+tennis benchmark establishes this default model as the best.
+
+The [architecture comparison](docs/architecture.md) describes a proposed larger
+system; dedicated event spotting and its other services are not included here.
+The repository uses the [MIT license](LICENSE); third-party code, model weights,
+and sample assets have their own terms. Read [third-party notes](docs/third-party.md)
+before distributing or deploying the bundled pose components.
