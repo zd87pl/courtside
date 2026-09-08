@@ -16,11 +16,13 @@ Interactive docs live at /docs.
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, HTTPException, Query, Response, status
+from fastapi import FastAPI, Header, HTTPException, Query, Response, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
@@ -29,7 +31,8 @@ from .config import settings
 from .models import (CompleteUploadRequest, CreateAccountRequest, CreatedKey,
                      CreateUploadRequest, CreateUploadResponse, Job, JobList,
                      JobReport, JobSummary, LogResponse, PartUrl,
-                     StartJobRequest, UsageResponse)
+                     StartJobRequest, UsageResponse, UploadedPartsResponse,
+                     DeletionStatus, JobExport, JobUsage)
 
 log = logging.getLogger("courtside.api")
 
@@ -52,12 +55,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+@app.exception_handler(jobs.AdmissionError)
+async def admission_error(request: Request, exc: jobs.AdmissionError):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
+
+
 if settings().cors_origins:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings().cors_origins),
         allow_methods=["GET", "POST", "DELETE"],
-        allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
+        allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "X-Courtside-User-Id"],
     )
 
 
@@ -134,7 +143,7 @@ def _uuid(value: str) -> uuid.UUID:
 
 def _load(job_id: str, principal: auth.Principal) -> dict:
     row = jobs.get(_uuid(job_id), principal.account_id)
-    if row is None:
+    if row is None or (principal.owner_id is not None and row.get("owner_id") != principal.owner_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such job.")
     return row
 
@@ -160,6 +169,7 @@ def readyz(response: Response) -> dict:
 @app.post("/v1/uploads", response_model=CreateUploadResponse, status_code=201,
           tags=["uploads"], summary="Reserve a job and get a presigned upload URL")
 def create_upload(body: CreateUploadRequest,
+                  idempotency_key: str | None = Header(default=None, min_length=8, max_length=200, pattern=r"^[A-Za-z0-9._:-]+$"),
                   principal: auth.Principal = auth.AccountDep) -> CreateUploadResponse:
     """Step 1. The video is PUT straight to object storage, not through this API.
 
@@ -180,27 +190,56 @@ def create_upload(body: CreateUploadRequest,
         raise HTTPException(400, "Use multipart for files larger than 5 GiB.")
 
     row = jobs.create(principal.account_id, filename=body.filename,
-                      content_type=body.content_type, video_key_fn=storage.video_key)
-    key = row["video_key"]
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=s.upload_url_ttl_s)
+                      content_type=body.content_type, video_key_fn=storage.video_key,
+                      owner_id=principal.owner_id, idempotency_key=idempotency_key,
+                      request_hash=hashlib.sha256(json.dumps(body.model_dump(), sort_keys=True).encode()).hexdigest(),
+                      requested_bytes=body.size_bytes, upload_multipart=body.multipart)
+    return _upload_plan(row)
 
-    if body.multipart:
-        plan = storage.plan_multipart(key, body.size_bytes, body.content_type)
-        with db.conn() as c:
-            c.execute("UPDATE jobs SET multipart_id = %s, video_bytes = %s WHERE id = %s",
-                      (plan.upload_id, body.size_bytes, row["id"]))
-        return CreateUploadResponse(
-            job_id=str(row["id"]), status=row["status"], multipart_id=plan.upload_id,
-            part_size=plan.part_size,
-            parts=[PartUrl(**p) for p in plan.urls],
-            expires_at=expires_at, max_upload_bytes=s.max_upload_bytes,
-        )
 
-    return CreateUploadResponse(
-        job_id=str(row["id"]), status=row["status"],
-        upload_url=storage.presign_put(key, body.content_type),
-        expires_at=expires_at, max_upload_bytes=s.max_upload_bytes,
-    )
+def _upload_plan(row: dict) -> CreateUploadResponse:
+    ttl = min(settings().upload_url_ttl_s,
+              int((row["expires_at"] - datetime.now(timezone.utc)).total_seconds()))
+    if ttl <= 0 or row["status"] != "awaiting_upload":
+        raise HTTPException(409, "Upload reservation expired or already started.")
+    data = dict(job_id=str(row["id"]), status=row["status"],
+                expires_at=datetime.now(timezone.utc) + timedelta(seconds=ttl),
+                max_upload_bytes=settings().max_upload_bytes)
+    if not row.get("upload_multipart"):
+        return CreateUploadResponse(**data, upload_url=storage.presign_put(
+            row["video_key"], row["content_type"], expires=ttl))
+    # Serialize multipart initialization/refresh so a retry reuses the upload ID.
+    with db.conn() as c, c.transaction():
+        current = c.execute("SELECT * FROM jobs WHERE id = %s FOR UPDATE", (row["id"],)).fetchone()
+        if current["status"] != "awaiting_upload" or current["deletion_requested_at"]:
+            raise HTTPException(409, "Reservation is no longer uploadable.")
+        ttl = min(settings().upload_url_ttl_s, int((current["expires_at"] - datetime.now(timezone.utc)).total_seconds()))
+        if ttl <= 0:
+            raise HTTPException(409, "Upload reservation expired.")
+        if current["multipart_id"]:
+            plan = storage.resume_multipart(current["video_key"], current["multipart_id"],
+                                             current["requested_bytes"], ttl)
+        else:
+            plan = storage.plan_multipart(current["video_key"], current["requested_bytes"],
+                                          current["content_type"], expires=ttl)
+            c.execute("UPDATE jobs SET multipart_id = %s WHERE id = %s", (plan.upload_id, row["id"]))
+    return CreateUploadResponse(**data, multipart_id=plan.upload_id, part_size=plan.part_size,
+                                parts=[PartUrl(**p) for p in plan.urls])
+
+
+@app.post("/v1/uploads/{job_id}/refresh", response_model=CreateUploadResponse, tags=["uploads"])
+def refresh_upload(job_id: str, principal: auth.Principal = auth.AccountDep):
+    """Reissue signed URLs within the original reservation's lifetime."""
+    return _upload_plan(_load(job_id, principal))
+
+
+@app.get("/v1/uploads/{job_id}/parts", response_model=UploadedPartsResponse, tags=["uploads"])
+def uploaded_parts(job_id: str, principal: auth.Principal = auth.AccountDep):
+    """List completed multipart parts and ETags for interrupted device uploads."""
+    row = _load(job_id, principal)
+    if row["status"] != "awaiting_upload" or not row["multipart_id"]:
+        raise HTTPException(409, "No active multipart upload.")
+    return {"job_id": job_id, "parts": storage.list_parts(row["video_key"], row["multipart_id"])}
 
 
 @app.post("/v1/uploads/{job_id}/complete", response_model=Job, tags=["uploads"],
@@ -260,7 +299,7 @@ def start_job(job_id: str, body: StartJobRequest,
     if spent >= principal.monthly_usd_cap:
         raise HTTPException(
             status.HTTP_402_PAYMENT_REQUIRED,
-            f"Monthly spend cap reached (${spent:.2f} of ${principal.monthly_usd_cap:.2f}).")
+            f"Monthly accounted spend/reservation cap reached (${spent:.2f} of ${principal.monthly_usd_cap:.2f}).")
     if jobs.running_count(principal.account_id) >= settings().max_concurrent_jobs_per_account:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
                             "Too many analyses in flight for this account. Wait for one to finish.")
@@ -268,6 +307,11 @@ def start_job(job_id: str, body: StartJobRequest,
     jobs.mark_uploaded(_uuid(job_id), principal.account_id, meta["size"])
     options = body.options.model_dump(mode="json")
     options["model"] = body.options.model or settings().default_model
+    allowed = settings().allowed_models or (settings().default_model,)
+    if options["model"] not in allowed:
+        raise HTTPException(422, "Model is not in the operator's ALLOWED_MODELS.")
+    if (options["pose"] or options["heatmap"]) and not settings().enable_pose:
+        raise HTTPException(422, "Pose is disabled; the operator must enable a pose-capable image.")
     try:
         row = jobs.enqueue(_uuid(job_id), principal.account_id,
                            options, body.webhook_url)
@@ -283,7 +327,7 @@ def start_job(job_id: str, body: StartJobRequest,
 def get_job(job_id: str, principal: auth.Principal = auth.AccountDep) -> Job:
     """Step 3. Poll every few seconds and back off in the background.
 
-    Optional signed webhooks are best effort; polling is still needed for recovery.
+    Optional signed webhooks use a durable outbox; polling is still needed for recovery.
     """
     return _job(_load(job_id, principal))
 
@@ -294,7 +338,7 @@ def list_jobs(principal: auth.Principal = auth.AccountDep,
               before: datetime | None = None,
               job_status: str | None = Query(default=None, alias="status")) -> JobList:
     rows = jobs.list_for_account(principal.account_id, limit=limit,
-                                 before=before, status=job_status)
+                                 before=before, status=job_status, owner_id=principal.owner_id)
     # No presigned URLs in a list: signing four URLs per row would turn a
     # 100-row page into 400 signatures for links nobody clicked.
     return JobList(
@@ -353,6 +397,7 @@ def get_logs(job_id: str, principal: auth.Principal = auth.AccountDep,
           summary="Cancel a queued or running job")
 def cancel_job(job_id: str, principal: auth.Principal = auth.AccountDep) -> Job:
     """Queued jobs stop at once; a running job is killed at its next heartbeat."""
+    _load(job_id, principal)
     row = jobs.request_cancel(_uuid(job_id), principal.account_id)
     if row is None:
         existing = _load(job_id, principal)
@@ -424,3 +469,59 @@ def revoke_key(key_id: str) -> Response:
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such active key.")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.delete("/v1/jobs/{job_id}", status_code=202, response_model=DeletionStatus, tags=["privacy"])
+def delete_job(job_id: str, principal: auth.Principal = auth.AccountDep):
+    """Hide results immediately and queue live-store erasure, including object versions."""
+    from .privacy import request_delete
+    return request_delete(_uuid(job_id), principal)
+
+
+@app.get("/v1/deletions/{job_id}", response_model=DeletionStatus, tags=["privacy"])
+def deletion_status(job_id: str, principal: auth.Principal = auth.AccountDep):
+    from .privacy import deletion_status as status_for
+    return status_for(_uuid(job_id), principal)
+
+
+@app.get("/v1/jobs/{job_id}/export", response_model=JobExport, tags=["privacy"])
+def export_job(job_id: str, principal: auth.Principal = auth.AccountDep):
+    """Owner-authorized metadata export; signed URLs link to complete result artifacts."""
+    row = _load(job_id, principal)
+    return {"job": _job(row), "session": row.get("session_json")}
+
+
+@app.get("/v1/jobs/{job_id}/usage", response_model=JobUsage, tags=["account"])
+def job_usage(job_id: str, principal: auth.Principal = auth.AccountDep):
+    from .billing import summary
+    row = _load(job_id, principal)
+    return summary(principal.account_id, row["id"])
+
+
+@app.get("/v1/admin/operations", dependencies=[auth.AdminDep], tags=["admin"])
+def operations():
+    """Monitor queue age, stale leases, worker capacity, outbox failures and unresolved costs."""
+    from .operations import snapshot
+    return snapshot()
+
+
+@app.post("/v1/admin/webhooks/{delivery_id}/retry", dependencies=[auth.AdminDep], tags=["admin"])
+def retry_webhook(delivery_id: str):
+    """Retry a failed outbox item after fixing the receiver; preserves its delivery ID."""
+    with db.conn() as c:
+        row = c.execute("""UPDATE webhook_outbox SET attempts = 0, failed_at = NULL,
+            error = NULL, next_attempt_at = now(), lease_until = NULL, lease_token = NULL
+            WHERE id = %s AND failed_at IS NOT NULL AND delivered_at IS NULL RETURNING id""",
+            (_uuid(delivery_id),)).fetchone()
+    if not row:
+        raise HTTPException(409, "Delivery is not in the failed outbox.")
+    return {"delivery_id": str(row["id"]), "status": "pending"}
+
+
+@app.get("/v1/admin/usage/unsettled", dependencies=[auth.AdminDep], tags=["admin"])
+def unsettled_usage(limit: int = Query(default=100, ge=1, le=1000)):
+    """Inspect retained reservations; reconcile unknown costs with provider records."""
+    with db.conn() as c:
+        return c.execute("""SELECT id, account_id, job_id, attempt, model, state,
+            reserved_usd, provider_id, created_at FROM model_usage WHERE actual_usd IS NULL
+            ORDER BY created_at LIMIT %s""", (limit,)).fetchall()

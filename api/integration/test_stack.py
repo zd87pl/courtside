@@ -41,7 +41,7 @@ def account(client):
 
 
 def test_upload_auth_retry_report_and_key_revocation(client, account):
-    headers = {"Authorization": f"Bearer {account['api_key']}"}
+    headers = {"Authorization": f"Bearer {account['api_key']}", "X-Courtside-User-Id": "integration-user"}
     assert client.get("/readyz").status_code == 200
     assert client.get("/v1/jobs").status_code == 401
     up = client.post("/v1/uploads", headers=headers,
@@ -104,7 +104,7 @@ def test_atomic_admission_and_old_attempt_cannot_finish(client, account):
 
 
 def test_multipart_completion(client, account):
-    headers = {"Authorization": f"Bearer {account['api_key']}"}
+    headers = {"Authorization": f"Bearer {account['api_key']}", "X-Courtside-User-Id": "integration-user"}
     up = client.post("/v1/uploads", headers=headers,
                      json={"filename": "part.mp4", "size_bytes": 8, "multipart": True}).json()
     r = httpx.put(up["parts"][0]["url"], content=b"testpart")

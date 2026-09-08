@@ -1,6 +1,6 @@
 # API service deps. The analysis pipeline itself comes from the repo root
-# package (`pip install -e '.[server,pose,youtube]'`), which pulls opencv,
-# numpy, pydantic, the OpenAI client, ultralytics and yt-dlp.
+# package (`pip install -e '.[server,youtube]'`), which pulls opencv,
+# numpy, pydantic, the OpenAI client and yt-dlp. Pose is an optional extra.
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.32,<1.0
 psycopg[binary,pool]>=3.2,<4.0

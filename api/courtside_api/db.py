@@ -8,7 +8,8 @@ the worker needs sync anyway (it blocks on a subprocess for up to an hour).
 from __future__ import annotations
 
 import threading
-from contextlib import contextmanager
+import hashlib
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Iterator
 
@@ -102,15 +103,36 @@ def _statements(sql: str) -> list[str]:
     return statements
 
 
-def bootstrap() -> None:
-    """Apply schema.sql. Idempotent, safe to run on every boot."""
-    with conn() as c:
+def bootstrap(*, connection=None) -> None:
+    """Apply ordered, checksummed migrations under a transaction/advisory lock.
+
+    Version 001 adopts the original idempotent schema on existing deployments.
+    Applied migrations are immutable; a checksum mismatch stops startup.
+    """
+    with (nullcontext(connection) if connection is not None else conn()) as c:
         # IF NOT EXISTS alone does not serialize concurrent catalog writes.
         # API processes and workers can all boot against an empty DB together.
         with c.transaction():
             c.execute("SELECT pg_advisory_xact_lock(724390812)")
-            for stmt in _statements(SCHEMA_PATH.read_text()):
-                c.execute(stmt)
+            c.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
+                version text PRIMARY KEY, checksum text NOT NULL,
+                applied_at timestamptz NOT NULL DEFAULT now())""")
+            files = [("001", SCHEMA_PATH)] + [
+                (p.stem.split("_", 1)[0], p)
+                for p in sorted(SCHEMA_PATH.with_name("migrations").glob("*.sql"))]
+            for version, path in files:
+                sql = path.read_text()
+                checksum = hashlib.sha256(sql.encode()).hexdigest()
+                applied = c.execute("SELECT checksum FROM schema_migrations WHERE version = %s",
+                                    (version,)).fetchone()
+                if applied:
+                    if applied["checksum"] != checksum:
+                        raise RuntimeError(f"Migration {version} checksum changed; restore the released file")
+                    continue
+                for stmt in _statements(sql):
+                    c.execute(stmt)
+                c.execute("INSERT INTO schema_migrations(version, checksum) VALUES (%s, %s)",
+                          (version, checksum))
 
 
 def close() -> None:

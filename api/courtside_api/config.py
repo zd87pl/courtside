@@ -69,6 +69,15 @@ class Settings:
     job_timeout_s: int = 4 * 3600              # hard ceiling on one analysis
     default_monthly_usd_cap: float = 50.0
     max_concurrent_jobs_per_account: int = 3
+    max_pending_uploads: int = 20
+    uploads_per_hour: int = 30
+    starts_per_hour: int = 30
+    require_user_id: bool = True
+    allowed_models: tuple[str, ...] = field(default_factory=tuple)
+    enable_pose: bool = False
+    request_reserve_usd: float = 0.50
+    require_provider_budget: bool = True
+    report_retention_days: int = 0
 
     # --- worker ---
     worker_id: str = ""
@@ -117,6 +126,15 @@ def settings() -> Settings:
         job_timeout_s=_int("JOB_TIMEOUT_S", 4 * 3600),
         default_monthly_usd_cap=_float("DEFAULT_MONTHLY_USD_CAP", 50.0),
         max_concurrent_jobs_per_account=_int("MAX_CONCURRENT_JOBS_PER_ACCOUNT", 3),
+        max_pending_uploads=max(1, _int("MAX_PENDING_UPLOADS", 20)),
+        uploads_per_hour=max(1, _int("UPLOADS_PER_HOUR", 30)),
+        starts_per_hour=max(1, _int("STARTS_PER_HOUR", 30)),
+        require_user_id=_bool("REQUIRE_USER_ID", True),
+        allowed_models=tuple(m.strip() for m in _env("ALLOWED_MODELS").split(",") if m.strip()),
+        enable_pose=_bool("ENABLE_POSE", False),
+        request_reserve_usd=max(0.01, _float("REQUEST_RESERVE_USD", 0.50)),
+        require_provider_budget=_bool("REQUIRE_PROVIDER_BUDGET", True),
+        report_retention_days=max(0, _int("REPORT_RETENTION_DAYS", 0)),
         worker_id=_env("WORKER_ID", _env("FLY_MACHINE_ID", "worker-local")),
         worker_concurrency=max(1, _int("WORKER_CONCURRENCY", 1)),
         work_dir=_env("WORK_DIR", "/data/work"),

@@ -4,15 +4,16 @@ Deploy into accounts owned by the receiving team. Choose **Fly.io** for the
 provided provisioning script, or **your own container infrastructure** below.
 The API and worker share an image, Postgres database, private bucket, and secrets.
 They are separate long-lived processes; a serverless HTTP function cannot run
-the worker. This repository does not require the `cloud/` browser app.
+the worker. The included `cloud/` browser prototype has a
+[separate deployment guide](../cloud/README.md); it runs independently of these services.
 
 ## Required resources and configuration
 
 | Resource | Requirements |
 |---|---|
-| Postgres | Version 14+; dedicated database; login with table/index creation permissions for initial bootstrap; TLS outside a private network |
-| Object store | Private S3-compatible bucket; read/write/delete objects, list bucket, create/complete/abort multipart uploads; clients must reach the signed endpoint |
-| Model service | Your OpenRouter key; defaults to `qwen/qwen3.8-27b`; verify with a short test |
+| Postgres | Version 14+; dedicated database; login with DDL permissions for ordered startup migrations; TLS outside a private network |
+| Object store | Private S3-compatible bucket; read/write/delete objects and versions, get bucket versioning, list bucket/versions/multipart uploads, create/complete/abort multipart uploads; clients must reach the signed endpoint |
+| Model service | Your OpenRouter key with a finite spending limit; defaults to `qwen/qwen3.8-27b`; verify with a short test |
 | API | Start with 512 MiB–1 GiB RAM and 1 CPU; HTTPS at platform proxy/load balancer |
 | Worker | Start with 2 CPUs, 8 GiB RAM, 100 GB writable scratch; concurrency 1; no GPU |
 | Secrets | Random `ADMIN_TOKEN`; account API keys stored on your mobile backend; optional webhook secret and trusted callback hosts |
@@ -66,7 +67,9 @@ script creates the app, Tigris bucket (default `<app-name>-media`), worker volum
 and generated admin/webhook secrets. It imports your database URL and model key,
 builds from the repository root, deploys API/worker, and requires `/readyz` to
 return 200. It does not configure your mobile backend, storage lifecycle, backups,
-DNS custom domains, quotas, or alerts.
+DNS custom domains, or alerts. Application quotas have conservative defaults; tune
+them for your product. Export explicit policy overrides from `.env.example` before
+running the script; it forwards the identity/model/budget/retention settings.
 
 To bring an existing S3 bucket instead of provisioning Tigris, also export
 `S3_BUCKET`, `S3_REGION`, credentials (or configure a runtime identity), and
@@ -145,7 +148,8 @@ worker scratch separate per replica. Do not scale a shared writable Compose
 volume across hosts without defining the storage semantics.
 
 Image dependency versions are constrained in `api/constraints.txt` for Linux /
-Python 3.12; CPU Torch installs from PyTorch's CPU index. Base OS packages and
+Python 3.12. The default image omits pose libraries and weights;
+[the optional pose build](OPERATIONS.md#optional-pose-image) installs CPU Torch. Base OS packages and
 build tooling still receive updates on rebuild. For reproducible releases,
 publish and deploy an immutable **image digest**, archive the dependency inventory,
 and retain the previous digest for rollback. Review pins and licenses periodically.
@@ -159,7 +163,9 @@ recreate both API and worker processes. For the Fly script, export that value
 before re-running the normal deployment command; it imports the explicit setting.
 Do the same for `OPENROUTER_URL` if a previous deployment pointed at another server.
 
-No database migration is required. Newly queued jobs use the new default; existing
+Changing only the model needs no database migration. Upgrading to API 0.2.0 also
+requires the [ownership/migration checklist](OPERATIONS.md#upgrade-from-the-original-handoff).
+Newly queued jobs use the new default; existing
 jobs with a recorded model keep it. Older queued jobs with `options.model: null`
 resolve the worker's current default when claimed. Verify the worker startup log
 and a new job's `options.model`, then run the one-clip `--analyze` smoke test.
@@ -171,17 +177,19 @@ Before using real footage, configure lifecycle in your bucket provider:
 - `uploads/`: expire source objects after your chosen short window (e.g. 2 days,
   greater than upload grace plus the maximum processing time).
 - Abort incomplete multipart uploads after a short window (e.g. 1 day).
+- `checkpoints/`: expire abandoned recovery data after your source retention window.
 - `reports/`: choose and document retention with the product owner; include old
   object versions and backups in deletion requirements if versioning is enabled.
 
-The worker attempts source deletion on its terminal results when
-`DELETE_SOURCE_AFTER_ANALYSIS=true`. Expired reservations, pre-run cancellations,
-failed cleanup calls, late PUTs to still-valid URLs, and hard worker crashes rely
-on lifecycle. Expiry in Postgres alone does not remove objects. Crash leftovers
-can also remain on scratch: clean directories for terminal jobs during maintenance,
-never active job directories. Reports retain frames/clips and are sensitive even
-after source deletion. OpenRouter and its chosen inference provider receive frames;
-review their processing/retention terms for your intended use.
+The worker maintenance loop retries source/checkpoint cleanup for terminal jobs,
+including expiry/cancellation, and cleans its terminal-job scratch. Explicit deletion
+also purges reports and object versions, aborts multipart uploads, and scrubs content
+in Postgres. Cleanup repeats beyond the original upload window to catch late PUTs.
+`REPORT_RETENTION_DAYS=0` preserves reports until explicit deletion; choose a positive
+retention period to enable automatic expiry (including old jobs). Keep lifecycle as
+a crash fallback and monitor deletion failures. Reports retain frames/clips and are
+sensitive even after source deletion. Provider copies and historical backups need
+separate retention policies. See [erasure and backup operations](OPERATIONS.md#deletion-and-retention).
 
 Native mobile uploads do not need CORS. For browser/hybrid uploads, configure the
 bucket's CORS for your exact origins: PUT/GET/HEAD, required Content-Type headers,
@@ -201,24 +209,27 @@ and exposed `ETag`. API `CORS_ORIGINS` is separate and does not configure storag
    configure trusted hosts/secret and verify HMAC + deduplication in your backend.
 
 Monitor queued-job age, running-job heartbeat age, job failures/retries, worker
-memory/disk, bucket growth, and provider spend. `/v1/usage` and `cost_usd` are
-**estimated** from pipeline token statistics, not actual billing. Failed attempts
-and in-flight spend can be missing. Admission checks are serialized per account,
-but the monthly cap does not reserve spend or stop an ongoing job. Apply a real
-provider budget and edge rate limits; add a spend ledger before selling usage.
+memory/disk, bucket growth, and provider spend. The admin operations endpoint
+exposes queue/worker/outbox/deletion/usage status. The durable ledger reserves
+before every model call and records actual provider costs when available, including
+failed/retried attempts. `/v1/usage` and `cost_usd` include unresolved holds; use
+`/v1/jobs/{id}/usage` to separate confirmed cost from reservations. Holds are not
+guaranteed request-price ceilings; retain the provider-side budget and reconcile
+uncertain costs before invoicing. See [cost controls](OPERATIONS.md#admission-and-model-costs).
 
 Workers heartbeat every 15 seconds independently of stdout. A stale lease after
 120 seconds is retried up to the job's `max_attempts` (default 2), and old attempts
-cannot finalize newer ones. Retries restart analysis and can incur duplicate
-provider charges. Cancellation and `JOB_TIMEOUT_S` interrupt silent subprocesses;
+cannot finalize newer ones. Compatible completed-clip checkpoints survive retries;
+unfinished calls, report generation, and moments can still repeat and incur charges. Cancellation and `JOB_TIMEOUT_S` interrupt silent subprocesses;
 S3/network operations also have socket timeouts. Deploy/shutdown interrupts work
-for later retry; it does not resume paid inference from a checkpoint.
+for later retry using validated checkpoints when available.
 
-Schema bootstrap is serialized and idempotent for **initial schema creation**.
-It is not a versioned migration framework. Before future schema changes, add
-explicit migrations, test an upgrade from the released schema, and take a backup.
-Enable database backups/PITR in your provider and test restoration into a separate
-database. Keep the release image digest and secret configuration alongside your
+Startup applies checksummed, ordered migrations under an advisory lock. Never
+edit applied SQL: add a numbered migration, test upgrading the released schema,
+and take a backup. Enable provider backups/PITR and test restoration into a separate
+database with the latest deletion manifest replayed before traffic. The supplied
+[backup/restore CLI](OPERATIONS.md#monitoring-and-backup-restoration) implements
+that workflow and is exercised by the disposable integration tests. Keep the release image digest and secret configuration alongside your
 runbook, without putting secret values in source control.
 
 For rollback, deploy the previous image digest with the same process/environment
@@ -235,11 +246,13 @@ and backups in the receiving team's account; destroy only those selected resourc
 ## Local integration tests (no provider charges)
 
 Use a **disposable** stack with no worker; tests create and delete their own accounts
-and objects and exercise queue recovery. Never point these tests at production:
+and objects and exercise queue recovery, migrations, erasure, backup restoration,
+and a real worker subprocess with synthetic video and a local provider stub. Never point these tests at production:
 
 ```bash
 docker compose -p courtside-handoff -f api/docker-compose.yml up -d postgres minio createbucket
-COURTSIDE_INTEGRATION=1 \
+COURTSIDE_INTEGRATION=1 COURTSIDE_TEST_PG_CONTAINER=courtside-handoff-postgres-1 \
+OPENROUTER_API_KEY=test-only WEBHOOK_SECRET=integration-secret WEBHOOK_ALLOWED_HOSTS=example.com \
 DATABASE_URL=postgres://courtside:courtside@localhost:5432/courtside \
 ADMIN_TOKEN=integration-admin S3_BUCKET=courtside \
 S3_ENDPOINT_URL=http://localhost:9000 S3_PUBLIC_ENDPOINT_URL=http://localhost:9000 \

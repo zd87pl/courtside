@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { guardRequest, RequestError } from "./request-guards";
 import { AuthError } from "./auth";
 
 type Handler = (req: Request) => Promise<NextResponse>;
@@ -7,8 +8,9 @@ type Handler = (req: Request) => Promise<NextResponse>;
 export function route(handler: Handler): Handler {
   return async (req) => {
     try {
-      return await handler(req);
+      return await handler(await guardRequest(req));
     } catch (e) {
+      if (e instanceof RequestError) return NextResponse.json({ error: e.message }, { status: e.status });
       if (e instanceof AuthError) {
         return NextResponse.json({ error: e.message }, { status: 401 });
       }

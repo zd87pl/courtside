@@ -6,6 +6,8 @@
 # run identical code, which keeps the pipeline the worker shells out to exactly
 # the one the API advertises.
 FROM python:3.12-slim AS base
+ARG INSTALL_POSE=false
+ENV ENABLE_POSE=${INSTALL_POSE}
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -24,25 +26,29 @@ WORKDIR /srv
 COPY api/constraints.txt /srv/api/constraints.txt
 ENV PIP_CONSTRAINT=/srv/api/constraints.txt
 
-# CPU-only torch first, from PyTorch's CPU index. Without this, ultralytics
-# drags in the CUDA build and the image grows by ~2.5 GB for hardware that a
-# Fly shared-cpu machine does not have.
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
-        "torch>=2.4" "torchvision>=0.19"
+# Pose is opt-in: the default image contains neither Ultralytics nor its weights.
+RUN case "$INSTALL_POSE" in true|false) ;; *) exit 2 ;; esac && \
+    if [ "$INSTALL_POSE" = true ]; then \
+      pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+        "torch>=2.4" "torchvision>=0.19"; \
+    fi
 
 COPY api/requirements.txt /srv/api/requirements.txt
 RUN pip install --no-cache-dir -r /srv/api/requirements.txt
 
 # The pipeline package. `server` = OpenAI-compatible backend (OpenRouter),
-# `pose` = YOLO overlays, `youtube` = URL ingest. Never `local` (Apple-only MLX).
+# `youtube` = URL ingest; pose is an explicit build option. Never `local` (Apple-only MLX).
 COPY pyproject.toml README.md LICENSE /srv/
 COPY courtside /srv/courtside
-RUN pip install --no-cache-dir '.[server,pose,youtube]'
+RUN pip install --no-cache-dir '.[server,youtube]' && \
+    if [ "$INSTALL_POSE" = true ]; then pip install --no-cache-dir '.[pose]'; fi
 
-# Bake the pose weights so a worker does not re-download them per job.
-RUN mkdir -p /opt/courtside && \
+# Only an explicitly selected pose build downloads these separately licensed weights.
+RUN if [ "$INSTALL_POSE" = true ]; then \
+    mkdir -p /opt/courtside && \
     curl -fsSL -o /opt/courtside/yolo11n-pose.pt \
-      https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-pose.pt
+      https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-pose.pt; \
+    fi
 
 COPY api/courtside_api /srv/courtside_api
 

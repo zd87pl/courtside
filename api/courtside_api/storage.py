@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import mimetypes
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -123,13 +124,17 @@ def plan_multipart(key: str, total_bytes: int, content_type: str | None = None,
                    expires: int | None = None) -> MultipartPlan:
     """Open a multipart upload and presign every part URL up front."""
     part_size, n_parts = part_plan(total_bytes)
+    deadline = time.time() + (expires or settings().upload_url_ttl_s)
 
     params = {"Bucket": bucket(), "Key": key}
     if content_type:
         params["ContentType"] = content_type
     upload_id = client().create_multipart_upload(**params)["UploadId"]
 
-    ttl = expires or settings().upload_url_ttl_s
+    ttl = int(deadline - time.time())
+    if ttl <= 0:
+        abort_multipart(key, upload_id)
+        raise StorageError("Reservation expired while initializing multipart upload")
     urls = [
         {
             "part_number": n,
@@ -164,8 +169,9 @@ def complete_multipart(key: str, upload_id: str, parts: list[dict]) -> None:
 def abort_multipart(key: str, upload_id: str) -> None:
     try:
         client().abort_multipart_upload(Bucket=bucket(), Key=key, UploadId=upload_id)
-    except ClientError:
-        pass
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") != "NoSuchUpload":
+            raise StorageError("Could not abort multipart upload") from e
 
 
 # ---------------------------------------------------------------- transfer
@@ -216,7 +222,9 @@ def delete_prefix(prefix: str) -> None:
     for page in paginator.paginate(Bucket=bucket(), Prefix=prefix):
         objs = [{"Key": o["Key"]} for o in page.get("Contents", [])]
         if objs:
-            client().delete_objects(Bucket=bucket(), Delete={"Objects": objs})
+            result = client().delete_objects(Bucket=bucket(), Delete={"Objects": objs})
+            if result.get("Errors"):
+                raise StorageError("Object deletion incomplete")
 
 
 def ping() -> bool:
@@ -225,3 +233,47 @@ def ping() -> bool:
         return True
     except Exception:
         return False
+
+
+def resume_multipart(key: str, upload_id: str, total_bytes: int, expires: int) -> MultipartPlan:
+    size, n_parts = part_plan(total_bytes)
+    urls = [{"part_number": n, "url": client(public=True).generate_presigned_url(
+        "upload_part", Params={"Bucket": bucket(), "Key": key, "UploadId": upload_id, "PartNumber": n},
+        ExpiresIn=expires)} for n in range(1, n_parts + 1)]
+    return MultipartPlan(upload_id, size, urls)
+
+
+def list_parts(key: str, upload_id: str) -> list[dict]:
+    try:
+        return [{"part_number": p["PartNumber"], "etag": p["ETag"], "size_bytes": p["Size"]}
+                for page in client().get_paginator("list_parts").paginate(
+                    Bucket=bucket(), Key=key, UploadId=upload_id)
+                for p in page.get("Parts", [])]
+    except ClientError as e:
+        raise StorageError("Multipart upload is no longer available; check completion status.") from e
+
+
+def purge_prefix(prefix: str) -> None:
+    """Delete all versions, delete markers, and incomplete uploads under a job prefix.
+
+    Missing permissions and per-object errors fail the sweep for a durable retry.
+    """
+    c = client()
+    # Some S3-compatible services return no multipart entries with Prefix.
+    # List bucket uploads and filter locally; never abort another job's upload.
+    for page in c.get_paginator("list_multipart_uploads").paginate(Bucket=bucket()):
+        for upload in page.get("Uploads", []):
+            if upload["Key"].startswith(prefix):
+                abort_multipart(upload["Key"], upload["UploadId"])
+    versioned = c.get_bucket_versioning(Bucket=bucket()).get("Status") in ("Enabled", "Suspended")
+    paginator = c.get_paginator("list_object_versions" if versioned else "list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket(), Prefix=prefix):
+        if versioned:
+            objects = [{"Key": o["Key"], "VersionId": o["VersionId"]}
+                       for o in page.get("Versions", []) + page.get("DeleteMarkers", [])]
+        else:
+            objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+        for start in range(0, len(objects), 1000):
+            result = c.delete_objects(Bucket=bucket(), Delete={"Objects": objects[start:start+1000]})
+            if result.get("Errors"):
+                raise StorageError("Object deletion incomplete; check bucket permissions/retention locks.")

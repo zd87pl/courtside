@@ -7,7 +7,8 @@ and a self-contained HTML report. No GPU is required on the API or worker host.
 **New here? Follow the [repository quick start](../README.md#local-api-quick-start).**
 Use [Deployment](DEPLOYMENT.md) for your infrastructure and
 [Mobile integration](MOBILE_INTEGRATION.md) for the client contract.
-The Next.js `cloud/` app is independent: it does not share API accounts or jobs.
+Read [Operations](OPERATIONS.md) for the 0.2.0 upgrade, quotas, usage ledger,
+recovery, erasure, and backups. The Next.js `cloud/` app is independent: it does not share API accounts or jobs.
 
 ## Default LLM
 
@@ -16,9 +17,9 @@ The Next.js `cloud/` app is independent: it does not share API accounts or jobs.
 | Model provider | OpenRouter, `https://openrouter.ai/api/v1` |
 | Vision-language model | **Qwen3.8 27B** |
 | Exact OpenRouter ID | `qwen/qwen3.8-27b` |
-| Model credential | Set your own `OPENROUTER_API_KEY` with available credits/model access |
+| Model credential | Set your own `OPENROUTER_API_KEY` with available credits/model access and a finite spending limit |
 | Client model selection | Omit `options.model`; the service chooses and records the default |
-| GPU or locally hosted LLM | Not required; the image includes CPU video/pose tooling |
+| GPU or locally hosted LLM | Not required; CPU video tooling is included, pose is an optional build |
 
 Qwen3.8 27B is a dense vision-language model with image and video understanding.
 OpenRouter lists image/video input and JSON-schema structured-output support,
@@ -51,7 +52,8 @@ OPENROUTER_URL=https://openrouter.ai/api/v1
 ```
 
 Overrides are optional: an operator can set `DEFAULT_MODEL`, and your backend can
-supply `options.model` for one job. Precedence is **job model → server DEFAULT_MODEL
+supply `options.model` for one job when included in `ALLOWED_MODELS` (empty permits
+only the default). Precedence is **job model → server DEFAULT_MODEL
 → built-in Qwen3.8 27B default**. Use a model that accepts images. The API saves the
 resolved model when a job is queued, so a later default change does not alter that
 job. It is visible in the start/poll response's `options.model` and in the finished
@@ -65,7 +67,7 @@ From the repository root, with Docker Compose v2 installed. Use Bash for these
 commands and leave the service terminal running:
 
 ```bash
-# Required for analysis; use a key with credits and access to the default model.
+# Required: credits, default-model access, and a finite OpenRouter key budget.
 # Bash example (input hidden); alternatively use your secret manager.
 read -r -s -p 'OpenRouter API key: ' OPENROUTER_API_KEY; echo
 export OPENROUTER_API_KEY
@@ -106,9 +108,10 @@ pose/moments and verifies HTML, JSON, and Markdown downloads. It should end with
 `Analysis and artifact downloads passed.` For a deployed service, add
 `--base-url https://your-api.example` and use an account key from that deployment.
 
-The first image build downloads CPU Torch, pose weights, and ffmpeg dependencies.
-A worker without `OPENROUTER_API_KEY` deliberately exits; the API still supports
-upload tests. The local stack does not automatically read `api/.env`.
+The first image build downloads ffmpeg and Python dependencies. Pose is disabled
+and absent by default; [enable it explicitly](OPERATIONS.md#optional-pose-image)
+after reviewing its terms. A worker without an OpenRouter key or verifiable finite
+key budget exits; the API still supports upload tests. The local stack does not automatically read `api/.env`.
 
 For physical-device development, expose the API and object endpoint through your
 own development network/tunnel and set `S3_PUBLIC_ENDPOINT_URL` to that reachable
@@ -125,8 +128,10 @@ Your backend → POST /v1/jobs/{id}/start
 Your backend → GET /v1/jobs/{id} → report URLs when succeeded
 ```
 
-Keep account API keys on your backend. Each key has access to every job in its
-Courtside account; your backend enforces which signed-in app user owns a job.
+Keep account API keys on your backend. Send `X-Courtside-User-Id` from the verified
+app session on every account-authenticated request. The API scopes jobs to that
+account/user; the header does not replace your login system. The smoke script sends
+`smoke-test-user` by default (`COURTSIDE_USER_ID` overrides it).
 Use `/docs` or `/openapi.json` for request models and the integration guide for
 retry, polling, WebView, and webhook behavior.
 

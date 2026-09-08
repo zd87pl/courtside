@@ -3,7 +3,7 @@
   "info": {
     "title": "Courtside API",
     "description": "FastAPI surface for the Courtside job API.\n\nVideo analysis runs asynchronously on a worker. Processing time depends on the\nfootage, model, and options; upload bytes go directly to object storage. The flow is:\n\n    POST /v1/uploads              -> job id + presigned URL(s)\n    PUT  <presigned url>          -> phone uploads straight to object storage\n    POST /v1/uploads/{id}/complete -> finish multipart uploads only\n    POST /v1/jobs/{id}/start      -> queued\n    GET  /v1/jobs/{id}            -> poll phase/progress, or take the webhook\n    GET  /v1/jobs/{id}/report     -> session facts + signed artifact URLs\n\nInteractive docs live at /docs.\n",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "paths": {
     "/v1/uploads": {
@@ -15,6 +15,25 @@
         "description": "Step 1. The video is PUT straight to object storage, not through this API.\n\nPass `multipart: true` with `size_bytes` for a resumable chunked upload --\non cellular that is the difference between retrying one 32 MiB part and\nre-sending the whole match.",
         "operationId": "create_upload_v1_uploads_post",
         "parameters": [
+          {
+            "name": "idempotency-key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 8,
+                  "maxLength": 200,
+                  "pattern": "^[A-Za-z0-9._:-]+$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
           {
             "name": "authorization",
             "in": "header",
@@ -29,6 +48,23 @@
                 }
               ],
               "title": "Authorization"
+            }
+          },
+          {
+            "name": "x-courtside-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Courtside-User-Id"
             }
           }
         ],
@@ -49,6 +85,158 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CreateUploadResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/uploads/{job_id}/refresh": {
+      "post": {
+        "tags": [
+          "uploads"
+        ],
+        "summary": "Refresh Upload",
+        "description": "Reissue signed URLs within the original reservation's lifetime.",
+        "operationId": "refresh_upload_v1_uploads__job_id__refresh_post",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "x-courtside-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Courtside-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateUploadResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/uploads/{job_id}/parts": {
+      "get": {
+        "tags": [
+          "uploads"
+        ],
+        "summary": "Uploaded Parts",
+        "description": "List completed multipart parts and ETags for interrupted device uploads.",
+        "operationId": "uploaded_parts_v1_uploads__job_id__parts_get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "x-courtside-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Courtside-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadedPartsResponse"
                 }
               }
             }
@@ -98,6 +286,23 @@
                 }
               ],
               "title": "Authorization"
+            }
+          },
+          {
+            "name": "x-courtside-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Courtside-User-Id"
             }
           }
         ],
@@ -168,6 +373,23 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "name": "x-courtside-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Courtside-User-Id"
+            }
           }
         ],
         "requestBody": {
@@ -210,7 +432,7 @@
           "jobs"
         ],
         "summary": "Poll a job",
-        "description": "Step 3. Poll every few seconds and back off in the background.\n\nOptional signed webhooks are best effort; polling is still needed for recovery.",
+        "description": "Step 3. Poll every few seconds and back off in the background.\n\nOptional signed webhooks use a durable outbox; polling is still needed for recovery.",
         "operationId": "get_job_v1_jobs__job_id__get",
         "parameters": [
           {
@@ -237,6 +459,23 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "name": "x-courtside-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Courtside-User-Id"
+            }
           }
         ],
         "responses": {
@@ -246,6 +485,80 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "privacy"
+        ],
+        "summary": "Delete Job",
+        "description": "Hide results immediately and queue live-store erasure, including object versions.",
+        "operationId": "delete_job_v1_jobs__job_id__delete",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "x-courtside-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Courtside-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletionStatus"
                 }
               }
             }
@@ -331,6 +644,23 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "name": "x-courtside-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Courtside-User-Id"
+            }
           }
         ],
         "responses": {
@@ -389,6 +719,23 @@
                 }
               ],
               "title": "Authorization"
+            }
+          },
+          {
+            "name": "x-courtside-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Courtside-User-Id"
             }
           }
         ],
@@ -460,6 +807,23 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "name": "x-courtside-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Courtside-User-Id"
+            }
           }
         ],
         "responses": {
@@ -523,6 +887,23 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "name": "x-courtside-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Courtside-User-Id"
+            }
           }
         ],
         "responses": {
@@ -582,6 +963,23 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "name": "x-courtside-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Courtside-User-Id"
+            }
           }
         ],
         "responses": {
@@ -630,6 +1028,23 @@
                 }
               ],
               "title": "Authorization"
+            }
+          },
+          {
+            "name": "x-courtside-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Courtside-User-Id"
             }
           }
         ],
@@ -822,6 +1237,397 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/deletions/{job_id}": {
+      "get": {
+        "tags": [
+          "privacy"
+        ],
+        "summary": "Deletion Status",
+        "operationId": "deletion_status_v1_deletions__job_id__get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "x-courtside-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Courtside-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletionStatus"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/jobs/{job_id}/export": {
+      "get": {
+        "tags": [
+          "privacy"
+        ],
+        "summary": "Export Job",
+        "description": "Owner-authorized metadata export; signed URLs link to complete result artifacts.",
+        "operationId": "export_job_v1_jobs__job_id__export_get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "x-courtside-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Courtside-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobExport"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/jobs/{job_id}/usage": {
+      "get": {
+        "tags": [
+          "account"
+        ],
+        "summary": "Job Usage",
+        "operationId": "job_usage_v1_jobs__job_id__usage_get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "x-courtside-user-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Courtside-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobUsage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/operations": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Operations",
+        "description": "Monitor queue age, stale leases, worker capacity, outbox failures and unresolved costs.",
+        "operationId": "operations_v1_admin_operations_get",
+        "parameters": [
+          {
+            "name": "x-admin-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Admin-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/webhooks/{delivery_id}/retry": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Retry Webhook",
+        "description": "Retry a failed outbox item after fixing the receiver; preserves its delivery ID.",
+        "operationId": "retry_webhook_v1_admin_webhooks__delivery_id__retry_post",
+        "parameters": [
+          {
+            "name": "delivery_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Delivery Id"
+            }
+          },
+          {
+            "name": "x-admin-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Admin-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/usage/unsettled": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Unsettled Usage",
+        "description": "Inspect retained reservations; reconcile unknown costs with provider records.",
+        "operationId": "unsettled_usage_v1_admin_usage_unsettled_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "x-admin-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Admin-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -1074,6 +1880,65 @@
         ],
         "title": "CreatedKey"
       },
+      "DeletionStatus": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "title": "Job Id"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "not_requested",
+              "pending",
+              "deleted"
+            ],
+            "title": "State"
+          },
+          "requested_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested At"
+          },
+          "deleted_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted At"
+          },
+          "upload_authorizations_expire_by": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upload Authorizations Expire By"
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "state"
+        ],
+        "title": "DeletionStatus"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1221,6 +2086,30 @@
         ],
         "title": "Job"
       },
+      "JobExport": {
+        "properties": {
+          "job": {
+            "$ref": "#/components/schemas/Job"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session"
+          }
+        },
+        "type": "object",
+        "required": [
+          "job"
+        ],
+        "title": "JobExport"
+      },
       "JobList": {
         "properties": {
           "jobs": {
@@ -1260,7 +2149,7 @@
               }
             ],
             "title": "Model",
-            "description": "Optional OpenRouter vision model ID. Omit to use the server's DEFAULT_MODEL (qwen/qwen3.8-27b out of the box). The resolved model is returned in the queued job's options.model.",
+            "description": "Optional OpenRouter vision model ID. Omit to use the server's DEFAULT_MODEL (qwen/qwen3.8-27b out of the box). Overrides must be in the operator's ALLOWED_MODELS. The resolved model is returned in the queued job's options.model.",
             "examples": [
               "qwen/qwen3.8-27b"
             ]
@@ -1276,8 +2165,8 @@
           "pose": {
             "type": "boolean",
             "title": "Pose",
-            "description": "Run YOLO pose overlays and strike-zone measurement.",
-            "default": true
+            "description": "Run pose overlays; requires an operator-enabled pose image.",
+            "default": false
           },
           "heatmap": {
             "type": "boolean",
@@ -1501,6 +2390,34 @@
         "title": "JobSummary",
         "description": "The numbers a mobile client shows without downloading the full session."
       },
+      "JobUsage": {
+        "properties": {
+          "confirmed_usd": {
+            "type": "number",
+            "title": "Confirmed Usd"
+          },
+          "reserved_usd": {
+            "type": "number",
+            "title": "Reserved Usd"
+          },
+          "unsettled_requests": {
+            "type": "integer",
+            "title": "Unsettled Requests"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          }
+        },
+        "type": "object",
+        "required": [
+          "confirmed_usd",
+          "reserved_usd",
+          "unsettled_requests",
+          "requests"
+        ],
+        "title": "JobUsage"
+      },
       "LogResponse": {
         "properties": {
           "job_id": {
@@ -1586,6 +2503,55 @@
         "additionalProperties": false,
         "type": "object",
         "title": "StartJobRequest"
+      },
+      "UploadedPart": {
+        "properties": {
+          "part_number": {
+            "type": "integer",
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Part Number"
+          },
+          "etag": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Etag"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "title": "Size Bytes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "part_number",
+          "etag",
+          "size_bytes"
+        ],
+        "title": "UploadedPart"
+      },
+      "UploadedPartsResponse": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "title": "Job Id"
+          },
+          "parts": {
+            "items": {
+              "$ref": "#/components/schemas/UploadedPart"
+            },
+            "type": "array",
+            "title": "Parts"
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "parts"
+        ],
+        "title": "UploadedPartsResponse"
       },
       "UsageResponse": {
         "properties": {

@@ -48,9 +48,14 @@ services:
     build:
       context: ..
       dockerfile: api/Dockerfile
+      args:
+        INSTALL_POSE: ${INSTALL_POSE:-false}
     command: uvicorn courtside_api.app:app --host 0.0.0.0 --port 8080
     ports: ["127.0.0.1:8080:8080"]
     environment: &env
+      REQUIRE_PROVIDER_BUDGET: ${REQUIRE_PROVIDER_BUDGET:-true}
+      REQUIRE_USER_ID: "true"
+      ENABLE_POSE: ${INSTALL_POSE:-false}
       DATABASE_URL: postgres://courtside:courtside@postgres:5432/courtside
       ADMIN_TOKEN: local-admin-token
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
@@ -73,6 +78,8 @@ services:
     build:
       context: ..
       dockerfile: api/Dockerfile
+      args:
+        INSTALL_POSE: ${INSTALL_POSE:-false}
     command: python -m courtside_api.worker
     environment: *env
     volumes:

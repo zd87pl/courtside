@@ -35,3 +35,8 @@ fly.deploy.*.toml
 *.MOV
 *.mkv
 *.pt
+
+# Database backups and erasure manifests contain customer data.
+backups/
+*.dump
+*.backup

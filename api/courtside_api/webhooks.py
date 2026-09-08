@@ -68,66 +68,74 @@ def build_payload(job: dict, event: str) -> dict:
     }
 
 
-def deliver(job: dict, event: str = "job.completed") -> None:
-    """Best-effort delivery with capped exponential backoff.
+def enqueue_pending() -> int:
+    """Terminal job rows are the durable source; scan catches every crash window."""
+    from psycopg.types.json import Jsonb
+    with db.conn() as c, c.transaction():
+        rows = c.execute("""SELECT j.* FROM jobs j WHERE j.status IN
+            ('succeeded', 'failed', 'cancelled', 'expired') AND j.webhook_url IS NOT NULL
+            AND j.deletion_requested_at IS NULL AND NOT EXISTS
+            (SELECT 1 FROM webhook_outbox o WHERE o.job_id = j.id AND o.event = 'job.completed')
+            LIMIT 100""").fetchall()
+        for row in rows:
+            c.execute("""INSERT INTO webhook_outbox(job_id, event, url, payload)
+                VALUES (%s, 'job.completed', %s, %s) ON CONFLICT(job_id, event) DO NOTHING""",
+                (row["id"], row["webhook_url"], Jsonb(build_payload(row, "job.completed"))))
+    return len(rows)
 
-    Runs on the worker thread after the job row is already final, so a receiver
-    that is down costs a slow tail on one job and never a lost result: the
-    client can always poll GET /v1/jobs/{id}.
-    """
-    url = job.get("webhook_url")
-    if not url:
-        return
+
+def dispatch_one() -> bool:
+    """Lease one event; retries survive restarts and success can be delivered twice."""
     s = settings()
-    # Revalidate persisted jobs too; configuration may have changed since start.
-    from .models import StartJobRequest
-    StartJobRequest(webhook_url=url)
-    body = json.dumps(build_payload(job, event), separators=(",", ":")).encode()
-    headers = {"Content-Type": "application/json", "User-Agent": "courtside-webhooks/1"}
-    headers[SIGNATURE_HEADER] = sign(body, s.webhook_secret)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
-
-    delivery_id = uuid.uuid4()
-    with db.conn() as c:
-        c.execute(
-            "INSERT INTO webhook_deliveries (id, job_id, url, event) VALUES (%s, %s, %s, %s)",
-            (delivery_id, job["id"], url, event),
-        )
-
-    last_error, code = None, None
-    for attempt in range(1, s.webhook_max_attempts + 1):
-        try:
-            headers[SIGNATURE_HEADER] = sign(body, s.webhook_secret)
-            req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-            with opener.open(req, timeout=s.webhook_timeout_s) as resp:
-                code = resp.status
-            if 200 <= (code or 0) < 300:
-                _record(delivery_id, attempt, code, None, delivered=True)
-                return
-            last_error = f"HTTP {code}"
-        except urllib.error.HTTPError as e:
-            code, last_error = e.code, f"HTTP {e.code}"
-            if 400 <= e.code < 500 and e.code != 429:
-                break                      # a 4xx will not become a 2xx on retry
-        except Exception as e:             # noqa: BLE001 - network, DNS, TLS, timeouts
-            last_error = f"{type(e).__name__}: {e}"
-        if attempt < s.webhook_max_attempts:
-            time.sleep(min(2 ** attempt, 30))
-
-    log.warning("webhook delivery failed for job %s: %s", job["id"], last_error)
-    _record(delivery_id, attempt, code, last_error, delivered=False)
-
-
-def _record(delivery_id: uuid.UUID, attempts: int, code: int | None,
-            error: str | None, *, delivered: bool) -> None:
+    token = uuid.uuid4()
+    with db.conn() as c, c.transaction():
+        c.execute("""UPDATE webhook_outbox SET failed_at = now(), error = 'Retry budget exhausted'
+            WHERE attempts >= %s AND delivered_at IS NULL AND failed_at IS NULL
+            AND (lease_until IS NULL OR lease_until < now())""", (s.webhook_max_attempts,))
+        row = c.execute("""UPDATE webhook_outbox SET lease_token = %s,
+            lease_until = now() + interval '120 seconds', attempts = attempts + 1
+            WHERE id = (SELECT id FROM webhook_outbox WHERE delivered_at IS NULL
+                AND failed_at IS NULL AND next_attempt_at <= now()
+                AND (lease_until IS NULL OR lease_until < now())
+                ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1)
+            RETURNING *""", (token,)).fetchone()
+    if not row:
+        return False
+    code, error, delivered = None, None, False
+    permanent = False
     try:
-        with db.conn() as c:
-            c.execute(
-                """UPDATE webhook_deliveries
-                      SET attempts = %s, status_code = %s, error = %s, delivered_at = %s
-                    WHERE id = %s""",
-                (attempts, code, error, time.strftime("%Y-%m-%d %H:%M:%S+00", time.gmtime())
-                 if delivered else None, delivery_id),
-            )
-    except Exception:
-        log.exception("could not record webhook delivery %s", delivery_id)
+        from .models import StartJobRequest
+        StartJobRequest(webhook_url=row["url"])
+        payload = dict(row["payload"], delivery_id=str(row["id"]))
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        headers = {"Content-Type": "application/json", "User-Agent": "courtside-webhooks/1",
+                   SIGNATURE_HEADER: sign(body, s.webhook_secret)}
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+        req = urllib.request.Request(row["url"], data=body, headers=headers, method="POST")
+        with opener.open(req, timeout=min(s.webhook_timeout_s, 60)) as resp:
+            code = resp.status
+        delivered = 200 <= code < 300
+        if not delivered:
+            error = f"HTTP {code}"
+    except urllib.error.HTTPError as e:
+        code, error = e.code, f"HTTP {e.code}"
+        permanent = 400 <= e.code < 500 and e.code not in (408, 429)
+    except ValueError:
+        error, permanent = "Callback is no longer allowed by configuration", True
+    except Exception as e:
+        error = type(e).__name__  # never persist callback URLs/query secrets in errors
+    failed = permanent or row["attempts"] >= s.webhook_max_attempts
+    with db.conn() as c:
+        c.execute("""UPDATE webhook_outbox SET lease_until = NULL, lease_token = NULL,
+            status_code = %s, error = %s,
+            delivered_at = CASE WHEN %s THEN now() ELSE NULL END,
+            failed_at = CASE WHEN %s AND NOT %s THEN now() ELSE NULL END,
+            next_attempt_at = now() + (%s * interval '1 second')
+            WHERE id = %s AND lease_token = %s""",
+            (code, error, delivered, failed, delivered, min(3600, 2 ** min(row["attempts"], 12)), row["id"], token))
+    return True
+
+
+def deliver(job: dict, event: str = "job.completed") -> None:
+    """Compatibility entrypoint: enqueue durable work, never block inference on HTTP."""
+    enqueue_pending()

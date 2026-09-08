@@ -126,3 +126,26 @@ test("markdown: paragraphs join, ordered lists keep numbering", () => {
   assert.ok(html.includes("<li>two</li>"));
   assert.ok(!html.includes("<script"));
 });
+
+// These guards run before route JSON parsing and before paid inference.
+test("request guards: reject cross-origin mutations and actual oversized bodies", async (t) => {
+  const { guardRequest, MAX_BODY_BYTES } = await import('../lib/request-guards.ts');
+  const previous = process.env.APP_ORIGIN;
+  process.env.APP_ORIGIN = 'https://private.example';
+  t.after(() => {
+    if (previous === undefined) delete process.env.APP_ORIGIN;
+    else process.env.APP_ORIGIN = previous;
+  });
+  const url = 'https://private.example/api/analyze';
+  await assert.rejects(guardRequest(new Request(url, { method: 'POST', body: '{}' })), /origin/);
+  await assert.rejects(guardRequest(new Request(url, {
+    method: 'POST', headers: { Origin: 'https://evil.example' }, body: '{}',
+  })), /origin/);
+  await assert.rejects(guardRequest(new Request(url, {
+    method: 'POST', headers: { Origin: 'https://private.example' }, body: 'x'.repeat(MAX_BODY_BYTES + 1),
+  })), /too large/);
+  const result = await guardRequest(new Request(url, {
+    method: 'POST', headers: { Origin: 'https://private.example' }, body: '{"ok":true}',
+  }));
+  assert.deepEqual(await result.json(), { ok: true });
+});

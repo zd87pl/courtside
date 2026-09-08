@@ -28,67 +28,81 @@ uncommitted work was preserved and extended; no live cloud resources were deploy
 
 ## Recommended next work
 
-1. **Before public mobile access:** implement user-level authentication/authorization
-   in the receiving backend, quotas/rate limits for reservations and job starts,
-   and a model-provider hard budget. Account keys are service credentials. Neither
-   the API's estimated spend cap nor the browser's login is a billing/abuse system.
-2. **Before commercial distribution:** resolve licensing for bundled pose code and
-   weights, sample footage rights, and retention/consent requirements for the actual
-   provider flow. See `third-party.md`; this review does not decide licensing terms.
-3. **Before charging by usage:** implement a durable spend ledger with in-flight
-   reservations, actual provider usage, failed-attempt accounting, and model allowlists.
-   The current cost is a rough token-based estimate and can undercount or overshoot.
-4. **For stronger delivery/retry guarantees:** implement reservation idempotency,
-   upload URL refresh/list-parts, resumable analysis checkpoints, and an outbox-based
-   webhook dispatcher. Current callbacks are best effort; polling is authoritative.
-5. **For customer deletion/export workflows:** add owner-authorized deletion endpoints
-   and auditable retention jobs covering Postgres, uploads, reports, object versions,
-   scratch, and backups. Bucket lifecycle currently handles abandoned data.
-6. **Before schema evolution/high availability:** introduce versioned migrations,
-   load/recovery tests, worker-capacity monitoring, and tested backup restoration.
-   Initial schema bootstrap does not upgrade existing table shapes.
-7. **If launching `cloud/` publicly:** add signup/login throttling, verified identity,
-   password reset, spend/rate limits, request-size limits appropriate to the hosting
-   platform, CSRF/origin defenses, and end-to-end tenant authorization tests against
-   Neon. It remains an independent proof of concept, not a mobile production console.
+The handover centers on the API/worker and also includes the `cloud/` browser
+prototype, its setup, tests, and [receiving-team acceptance checklist](../cloud/README.md#receiving-team-acceptance).
+The seven follow-up items from the original review have the status below; browser
+public-launch requirements remain distinct from handing over the private prototype.
+API **0.2.0** requires a matching backend/configuration upgrade;
+read [the upgrade checklist](../api/OPERATIONS.md#upgrade-from-the-original-handoff)
+before deploying over an existing installation.
+
+| Original item | Implemented in this repository | Receiving-team acceptance still required |
+|---|---|---|
+| 1. User access, quotas, hard provider budget | Required backend-delegated user ID; account/user ownership on reads and mutations; shared pending/upload/start limits; worker startup verifies a finite OpenRouter key budget | Derive the ID from verified app login, keep account keys on the backend, configure edge limits and the actual provider key |
+| 2. Licensing, media rights, consent | Default image omits Torch/Ultralytics/YOLO; pose requires explicit build/runtime opt-in; sample provenance and provider data flow documented | Choose dependency/model terms, footage permissions, consent, and retention for the actual product; this review does not grant rights |
+| 3. Durable accounting | Per-request reservations, provider cost settlement, failed/retried-attempt records, model allowlist, unresolved-cost inspection and generation reconciliation | Set a suitable hold/provider budget, reconcile unknown costs and historical estimates before charging; payment collection remains outside the service |
+| 4. Recovery and delivery | Upload idempotency, URL refresh/list-parts, fenced source/options/code-validated clip checkpoints, durable leased webhook outbox with stable delivery IDs and admin replay | Persist upload plans, deduplicate callbacks, keep polling, and exercise device interruption/recovery |
+| 5. Export/deletion/retention | Owner-authorized export and deletion, cancellation/tombstones, audited retrying cleanup of content/objects/versions/multipart/checkpoints/scratch, optional report retention, deletion-manifest replay after database restore | Configure S3 deletion/lifecycle permissions, backup expiry, provider retention, and report retention (default 0 preserves reports until explicit deletion) |
+| 6. Schema/recovery/operations | Checksummed ordered migrations, legacy-upgrade and concurrent-admission/recovery tests, worker/queue/outbox/deletion/usage monitoring, tested backup/restore CLI; cleanup batches rotate past failures | Provision HA/PITR, alerts, worker storage, and load/capacity tests on the chosen infrastructure |
+| 7. Conditional public browser launch | `cloud/` is private by default: production access gate, required origin configuration, mutation-origin checks, streamed body-size limit | Public launch remains a separate scope: verified identity, password recovery, signup/login throttling, spend limits, hosted request-size acceptance, and tenant tests against Neon |
+
+Account keys are service credentials. `X-Courtside-User-Id` is trusted only because
+the receiving backend supplies it after authenticating the app user; it is not an
+end-user token verifier. Existing jobs need ownership backfill from that backend's
+mapping. The private browser has its own database/login and does not inherit the
+Python API's ledger, ownership, or deletion workflows.
+
+Per-request holds are not guaranteed upper bounds on provider charges. Unknown
+responses retain reservations, and legacy estimates remain labelled as estimates.
+Clip checkpoints prevent repeating compatible completed clips, but interrupted
+requests and report/moment generation can still incur repeat charges. Webhooks
+can arrive more than once or exhaust retries. Live-store erasure does not erase
+historical backups or downstream provider copies.
+
+[Operations runbook](../api/OPERATIONS.md), [integration contract](../api/MOBILE_INTEGRATION.md),
+[third-party notes](third-party.md), [receiving-team checklist](../HANDOFF.md).
 
 ## Validation limits
 
-Model-free pipeline/API tests, real local Postgres/MinIO contract tests, the browser
-production build, dependency audit, and container runtime checks are automated or
-recorded in this handoff. Docker Compose is for local/own-host testing; the Fly
-script is tested with a mock CLI and needs recipient-account acceptance. No real
-provider key, paid analysis, public endpoint, or mobile app was exercised during
-this review. CI configuration was updated; a remote CI run must follow the commit.
+The following local checks passed for this update:
 
-Recorded local results:
+- **252** Python pipeline/API/regression tests.
+- **18** real PostgreSQL 16 / MinIO integration tests, including concurrent upload
+  idempotency and admission, ownership isolation, spend holds/settlement, checkpoint
+  validation, outbox replay/recovery, versioned object and multipart erasure,
+  cleanup fairness, legacy schema upgrade, and backup restoration with newer
+  deletion tombstones.
+- The integration suite runs the actual worker subprocess on synthetic ffmpeg
+  video using a local HTTP provider stub and verifies usage records and published
+  report downloads. It makes no paid model calls.
+- **10** browser tests; production build and TypeScript check passed. A local
+  production server also verified the private gate and Origin/body-size rejection.
 
-- 236 Python pipeline/API/regression tests passed (Python 3.11).
-- 3 real Postgres 16 / MinIO integration tests passed, including multipart retry.
-- 8 browser logic tests passed, including a Node 22 container run; production
-  build and standalone TypeScript check passed. Local build used Node 25;
-  CI is configured to build on supported Node 22.
-- Browser `npm audit`: zero reported vulnerabilities after the locked updates.
-- Linux arm64 and amd64 deployment images built with the pinned dependencies;
-  runtime imports and bundled pose-model loading passed on both architectures.
-- Fresh-volume ownership/non-root execution, container readiness, and the supplied
-  upload/complete/cancel smoke script passed. Temporary service containers and test
-  database/storage volumes were removed afterward.
-- OpenAPI JSON parsed; local documentation links, Compose configurations, shell
-  syntax, and whitespace checks passed. A current-source credential-pattern scan
-  found no matches; this was not a full Git-history secret audit.
+- Current Linux arm64 default and optional pose images built successfully. The
+  default image passed imports, absence-of-pose checks, fresh-volume UID 10001
+  permissions, API 0.2.0 readiness against Postgres/S3, and the documented
+  upload/complete/cancel smoke script. The optional image loaded its pose model.
+- Generated OpenAPI matches source; local documentation links/anchors, Compose
+  configurations, Python compilation, shell syntax, and whitespace checks passed.
 
-## Default model follow-up
+The original handoff also recorded a clean browser dependency audit and image
+checks on Linux amd64. This update's local image checks used Linux arm64; CI builds
+the default image on amd64 after the changes are committed and pushed.
 
-The API now defaults to OpenRouter's `qwen/qwen3.8-27b`.
-Runtime defaults, Fly/Compose settings, environment examples, the browser model
-selection, and setup documentation agree. The selected model is recorded on
-queue admission, and missing provider credentials fail before worker DB startup.
-For Qwen3.8 27B, both model clients request non-thinking mode and retain it through
-schema fallback, avoiding an implicit return to the model's default thinking mode.
-Regression coverage checks omitted/blank configuration, operator/job overrides,
-deployment defaults, the queued response, frame requests, and provider rejection.
-Updated verification: 247 Python tests passed; 9 browser tests, production build,
-TypeScript check, Compose model
-configuration, and OpenAPI documentation checks passed. No paid inference or
-comparative tennis-model benchmark was run for this change.
+No real provider key, paid analysis, public endpoint, mobile app, live Fly
+provisioning, production load test, or receiving-team backup system was exercised.
+The Fly script is covered by mock CLI tests. CI configuration is updated, but a
+remote CI run must follow the commit. Disposable service containers, test data
+volumes, and the local browser test server were removed/stopped after verification.
+These checks support a deployment/integration handoff; they do not certify
+public-product quality, licensing, privacy policy, or production capacity.
+
+## Default model
+
+The API defaults to OpenRouter's `qwen/qwen3.8-27b`. Runtime defaults, Fly/Compose,
+environment examples, the browser selection, and setup documentation agree.
+The API records the selected model on queue admission. Both model clients request
+non-thinking mode for Qwen3.8 and retain it through schema fallback. Omitting
+`ALLOWED_MODELS` permits only the configured default. No comparative tennis-model
+benchmark establishes this model as the best; the receiver should assess its own
+footage and provider route.

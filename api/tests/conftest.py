@@ -32,6 +32,9 @@ def _no_real_database(monkeypatch):
     the connection attempt would only hang.
     """
     from courtside_api import db
+    def no_connection():
+        pytest.fail("Unit test attempted a real database connection; stub the boundary or use integration tests")
+    monkeypatch.setattr(db, "conn", no_connection)
     monkeypatch.setattr(db, "bootstrap", lambda: None)
     monkeypatch.setattr(db, "close", lambda: None)
     monkeypatch.setattr(db, "ping", lambda: True)

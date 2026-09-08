@@ -548,6 +548,12 @@ def main(argv: list[str] | None = None) -> int:
             per_clip_stats.append(stats)
             clip_json_path.write_text(analysis.model_dump_json(indent=2))
             stats_path.write_text(json.dumps(stats))
+            if os.environ.get("COURTSIDE_JOB_ID"):
+                try:
+                    from courtside_api.checkpoints import save
+                    save(out_dir)
+                except Exception:
+                    _log("    checkpoint could not be persisted; completed clip remains local")
             clip_records.append({"index": i, "frame_dir": f"clip_{i:03d}", "fps_used": cf.fps_used,
                                  "n_frames": len(cf.frames), "status": "ok", "analysis": analysis.model_dump()})
             n_flags = sum(len(s.technique_flags) + len(s.tactical_flags) for s in analysis.strokes)

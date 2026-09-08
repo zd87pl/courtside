@@ -22,7 +22,7 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
-from . import db
+from . import db, controls
 from .config import settings
 
 TERMINAL = ("succeeded", "failed", "cancelled", "expired")
@@ -32,7 +32,8 @@ _COLUMNS = """
     video_bytes, multipart_id, options, webhook_url, error, error_code, cost_usd,
     video_duration_s, clips_total, clips_done, report_prefix, session_json,
     log_tail, attempts, max_attempts, worker_id, cancel_requested, created_at,
-    queued_at, started_at, finished_at, heartbeat_at, expires_at
+    queued_at, started_at, finished_at, heartbeat_at, expires_at, owner_id,
+    request_hash, requested_bytes, upload_multipart, deletion_requested_at, deleted_at, checkpoint_key
 """
 
 
@@ -43,25 +44,40 @@ def _now() -> datetime:
 # ------------------------------------------------------------------ create
 
 def create(account_id: uuid.UUID, *, filename: str, content_type: str,
-           video_key_fn, multipart_id: str | None = None) -> dict:
+           video_key_fn, multipart_id: str | None = None, owner_id: str | None = None,
+           idempotency_key: str | None = None, request_hash: str | None = None,
+           requested_bytes: int | None = None, upload_multipart: bool = False) -> dict:
     job_id = uuid.uuid4()
     key = video_key_fn(account_id, job_id, filename)
     expires = _now() + timedelta(seconds=settings().upload_grace_s)
-    with db.conn() as c:
-        row = c.execute(
-            f"""
-            INSERT INTO jobs (id, account_id, status, filename, content_type,
-                              video_key, multipart_id, expires_at)
-            VALUES (%s, %s, 'awaiting_upload', %s, %s, %s, %s, %s)
-            RETURNING {_COLUMNS}
-            """,
-            (job_id, account_id, filename, content_type, key, multipart_id, expires),
-        ).fetchone()
-    return row
+    with db.conn() as c, c.transaction():
+        c.execute("SELECT id FROM accounts WHERE id = %s FOR UPDATE", (account_id,))
+        if idempotency_key:
+            old = c.execute(f"SELECT {_COLUMNS} FROM jobs WHERE account_id = %s AND idempotency_key = %s",
+                            (account_id, idempotency_key)).fetchone()
+            if old:
+                if old["request_hash"] != request_hash or old["owner_id"] != owner_id:
+                    raise AdmissionError(409, "Idempotency-Key was used for a different request or user.")
+                if old["status"] != "awaiting_upload" or old["deletion_requested_at"] or old["expires_at"] <= _now():
+                    raise AdmissionError(409, "Reservation is no longer uploadable; poll the original job.")
+                return old
+        pending = c.execute("SELECT count(*) AS n FROM jobs WHERE account_id = %s AND status = 'awaiting_upload' AND deletion_requested_at IS NULL",
+                            (account_id,)).fetchone()["n"]
+        if pending >= settings().max_pending_uploads:
+            raise AdmissionError(429, "Too many pending upload reservations.")
+        controls.rate(c, account_id, "uploads", settings().uploads_per_hour)
+        return c.execute(f"""
+            INSERT INTO jobs (id, account_id, filename, content_type, video_key,
+                multipart_id, expires_at, owner_id, idempotency_key, request_hash,
+                requested_bytes, upload_multipart)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING {_COLUMNS}""",
+            (job_id, account_id, filename, content_type, key, multipart_id, expires,
+             owner_id, idempotency_key, request_hash, requested_bytes, upload_multipart)).fetchone()
 
 
 def get(job_id: uuid.UUID, account_id: uuid.UUID | None = None) -> dict | None:
-    sql = f"SELECT {_COLUMNS} FROM jobs WHERE id = %s"
+    sql = f"SELECT {_COLUMNS} FROM jobs WHERE id = %s AND deletion_requested_at IS NULL"
     params: list[Any] = [job_id]
     if account_id is not None:            # tenant isolation is enforced in SQL
         sql += " AND account_id = %s"
@@ -71,9 +87,12 @@ def get(job_id: uuid.UUID, account_id: uuid.UUID | None = None) -> dict | None:
 
 
 def list_for_account(account_id: uuid.UUID, *, limit: int = 25,
-                     before: datetime | None = None, status: str | None = None) -> list[dict]:
-    sql = f"SELECT {_COLUMNS} FROM jobs WHERE account_id = %s"
+                     before: datetime | None = None, status: str | None = None, owner_id: str | None = None) -> list[dict]:
+    sql = f"SELECT {_COLUMNS} FROM jobs WHERE account_id = %s AND deletion_requested_at IS NULL"
     params: list[Any] = [account_id]
+    if owner_id is not None:
+        sql += " AND owner_id = %s"
+        params.append(owner_id)
     if status:
         sql += " AND status = %s"
         params.append(status)
@@ -117,14 +136,18 @@ def enqueue(job_id: uuid.UUID, account_id: uuid.UUID, options: dict,
             return None
         if row["status"] == "queued":
             return row
+        controls.rate(c, account_id, "starts", settings().starts_per_hour)
         usage = c.execute(
             """SELECT COUNT(*) FILTER (WHERE status IN ('queued', 'running')) AS active,
                       COALESCE(SUM(cost_usd) FILTER (WHERE finished_at >=
                         date_trunc('month', now(), 'UTC')), 0) AS spent
                  FROM jobs WHERE account_id = %s""", (account_id,)
         ).fetchone()
-        if usage["spent"] >= account["monthly_usd_cap"]:
-            raise AdmissionError(402, "Monthly estimated spend cap reached.")
+        charged = c.execute("""SELECT COALESCE(sum(COALESCE(actual_usd, reserved_usd)), 0) AS spent
+            FROM model_usage WHERE account_id = %s AND created_at >= date_trunc('month', now(), 'UTC')""",
+            (account_id,)).fetchone()["spent"]
+        if charged >= account["monthly_usd_cap"]:
+            raise AdmissionError(402, "Monthly spend plus unresolved reservations reached the account cap.")
         if usage["active"] >= settings().max_concurrent_jobs_per_account:
             raise AdmissionError(429, "Too many analyses in flight for this account.")
         return c.execute(
@@ -273,18 +296,11 @@ def expire_stale_uploads() -> int:
 # -------------------------------------------------------------------- usage
 
 def month_usage(account_id: uuid.UUID) -> tuple[float, int]:
-    """(usd spent, jobs run) in the current calendar month, UTC."""
+    """Confirmed provider cost plus unresolved reservations in the current UTC month."""
     with db.conn() as c:
-        row = c.execute(
-            """
-            SELECT COALESCE(SUM(cost_usd), 0) AS spent, COUNT(*) AS n
-              FROM jobs
-             WHERE account_id = %s
-               AND status IN ('succeeded', 'failed', 'cancelled')
-               AND finished_at >= date_trunc('month', now(), 'UTC')
-            """,
-            (account_id,),
-        ).fetchone()
+        row = c.execute("""SELECT COALESCE(SUM(COALESCE(actual_usd, reserved_usd)), 0) AS spent,
+            COUNT(DISTINCT job_id) AS n FROM model_usage WHERE account_id = %s
+            AND created_at >= date_trunc('month', now(), 'UTC')""", (account_id,)).fetchone()
     return float(row["spent"]), int(row["n"])
 
 

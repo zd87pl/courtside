@@ -29,6 +29,7 @@ class Principal:
     account_name: str
     key_id: uuid.UUID
     monthly_usd_cap: float
+    owner_id: str | None = None
 
 
 def generate_key() -> tuple[str, str, str]:
@@ -59,9 +60,13 @@ def _bearer(authorization: str | None) -> str:
     return token.strip()
 
 
-def require_account(authorization: str | None = Header(default=None)) -> Principal:
+def require_account(authorization: str | None = Header(default=None),
+                    x_courtside_user_id: str | None = Header(default=None, max_length=200)) -> Principal:
     """FastAPI dependency: resolve a bearer key to its account."""
     key = _bearer(authorization)
+    owner = x_courtside_user_id.strip() if isinstance(x_courtside_user_id, str) else None
+    if owner and (len(owner) > 200 or any(ord(ch) < 32 for ch in owner)):
+        raise HTTPException(400, "Invalid X-Courtside-User-Id")
     with db.conn() as c:
         row = c.execute(
             """
@@ -75,6 +80,8 @@ def require_account(authorization: str | None = Header(default=None)) -> Princip
             raise _unauthorized("Invalid or revoked API key.")
         if row["disabled_at"] is not None:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "This account is disabled.")
+        if settings().require_user_id and not owner:
+            raise HTTPException(400, "Your authenticated backend must supply X-Courtside-User-Id")
         # Best-effort last-used stamp; never fail a request over telemetry.
         try:
             c.execute("UPDATE api_keys SET last_used_at = %s WHERE id = %s",
@@ -86,6 +93,7 @@ def require_account(authorization: str | None = Header(default=None)) -> Princip
         account_name=row["name"],
         key_id=row["key_id"],
         monthly_usd_cap=float(row["monthly_usd_cap"]),
+        owner_id=owner,
     )
 
 

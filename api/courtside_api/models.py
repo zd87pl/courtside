@@ -35,6 +35,7 @@ class JobOptions(BaseModel):
         default=None,
         description="Optional OpenRouter vision model ID. Omit to use the server's "
                     f"DEFAULT_MODEL ({DEFAULT_OPENROUTER_MODEL} out of the box). "
+                    "Overrides must be in the operator's ALLOWED_MODELS. "
                     "The resolved model is returned in the queued job's options.model.",
         examples=[DEFAULT_OPENROUTER_MODEL],
     )
@@ -44,7 +45,7 @@ class JobOptions(BaseModel):
                     "limited preview; processing time and provider charges vary "
                     "with footage, model, and options.",
     )
-    pose: bool = Field(default=True, description="Run YOLO pose overlays and strike-zone measurement.")
+    pose: bool = Field(default=False, description="Run pose overlays; requires an operator-enabled pose image.")
     heatmap: bool = Field(default=False, description="Render the court heatmap graphic.")
     moments: int = Field(default=6, ge=0, le=40, description="Flagged-moment deep dives to build.")
     fps: float = Field(default=4.0, gt=0, le=30)
@@ -158,6 +159,15 @@ class CompleteUploadRequest(BaseModel):
         return parts
 
 
+class UploadedPart(CompletedPart):
+    size_bytes: int
+
+
+class UploadedPartsResponse(BaseModel):
+    job_id: str
+    parts: list[UploadedPart]
+
+
 class StartJobRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -226,6 +236,26 @@ class Job(BaseModel):
 class JobList(BaseModel):
     jobs: list[Job]
     next_cursor: str | None = None
+
+
+class JobExport(BaseModel):
+    job: Job
+    session: dict[str, Any] | None = None
+
+
+class DeletionStatus(BaseModel):
+    job_id: str
+    state: Literal["not_requested", "pending", "deleted"]
+    requested_at: datetime | None = None
+    deleted_at: datetime | None = None
+    upload_authorizations_expire_by: datetime | None = None
+
+
+class JobUsage(BaseModel):
+    confirmed_usd: float
+    reserved_usd: float
+    unsettled_requests: int
+    requests: int
 
 
 class LogResponse(BaseModel):

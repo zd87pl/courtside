@@ -25,7 +25,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import db, jobs, storage, webhooks
+from . import db, jobs, storage, webhooks, billing, checkpoints, privacy
 from .config import settings
 from .models import JobOptions
 from .phases import Progress
@@ -134,12 +134,22 @@ def _run_pipeline(job: dict, work: Path, lease: Lease) -> tuple[int, list[str], 
     opts = JobOptions.model_validate(job["options"] or {})
     video = work / "source" / Path(job["video_key"]).name
     out_dir = work / "out"
+    before = storage.head(job["video_key"])
     storage.download(job["video_key"], video, callback=lease.check)
+    after = storage.head(job["video_key"])
+    if not before or not after or before["etag"] != after["etag"]:
+        raise RuntimeError("Source changed during download")
+    checkpoints.restore(job, work, after["etag"])
     lease.check()
     argv = opts.to_argv(str(video), str(out_dir), s.openrouter_url, s.default_model)
+    argv.insert(argv.index("--"), "--resume")
     env = dict(os.environ)
     env["OPENROUTER_API_KEY"] = s.openrouter_api_key
     env["PYTHONUNBUFFERED"] = "1"
+    env["COURTSIDE_JOB_ID"] = str(job["id"])
+    env["COURTSIDE_JOB_ATTEMPT"] = str(job["attempts"])
+    env["COURTSIDE_JOB_WORKER"] = job["worker_id"]
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent) + os.pathsep + env.get("PYTHONPATH", "")
     proc = subprocess.Popen(
         argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         errors="replace", bufsize=1, env=env, cwd=str(work), start_new_session=True,
@@ -221,6 +231,8 @@ def process(job: dict) -> None:
     final = None
 
     def finish(**kwargs):
+        usage = billing.summary(job["account_id"], job_id)
+        kwargs["cost_usd"] = usage["confirmed_usd"] + usage["reserved_usd"]
         return jobs.finish(job_id, worker_id=job["worker_id"], attempt=job["attempts"], **kwargs)
 
     log.info("job %s: starting (attempt %s)", job_id, job["attempts"])
@@ -323,9 +335,40 @@ def _janitor() -> None:
             if n:
                 log.info("janitor: reclaimed %s stale job(s)", n)
             jobs.expire_stale_uploads()
+            webhooks.enqueue_pending()
+            privacy.sweep()
+            privacy.clean_scratch()
+            billing.reconcile()
+            with db.conn() as c:
+                c.execute("DELETE FROM rate_limits WHERE bucket < floor(extract(epoch from now()) / 3600) - 48")
         except Exception:
             log.exception("janitor pass failed")
         _shutdown.wait(60)
+
+
+def _telemetry(worker_id):
+    while not _shutdown.is_set():
+        try:
+            with db.conn() as c:
+                c.execute("""INSERT INTO workers(id, slots) VALUES (%s, %s)
+                    ON CONFLICT(id) DO UPDATE SET slots = excluded.slots, heartbeat_at = now()""",
+                    (worker_id, settings().worker_concurrency))
+                c.execute("DELETE FROM workers WHERE heartbeat_at < now() - interval '7 days'")
+        except Exception:
+            log.exception("worker telemetry failed")
+        _shutdown.wait(15)
+
+
+def _maintenance():
+    while not _shutdown.is_set():
+        try:
+            webhooks.enqueue_pending()
+            for _ in range(10):
+                if _shutdown.is_set() or not webhooks.dispatch_one():
+                    break
+        except Exception:
+            log.exception("worker telemetry/outbox pass failed")
+        _shutdown.wait(5)
 
 
 def main() -> int:
@@ -339,6 +382,12 @@ def main() -> int:
         log.error("OPENROUTER_API_KEY is not set; every job would fail. Refusing to start.")
         return 2
 
+    if s.require_provider_budget:
+        try:
+            billing.verify_provider_budget()
+        except Exception as e:
+            log.error("Provider budget verification failed (%s); configure a capped OpenRouter key", type(e).__name__)
+            return 2
     Path(s.work_dir).mkdir(parents=True, exist_ok=True)
     db.bootstrap()
     log.info("model backend: %s; default model: %s", s.openrouter_url, s.default_model)
@@ -347,7 +396,9 @@ def main() -> int:
         signal.signal(sig, lambda *_: _shutdown.set())
 
     log.info("worker %s up: %s slot(s), work_dir=%s", worker_id, s.worker_concurrency, s.work_dir)
-    threads = [threading.Thread(target=_janitor, daemon=True, name="janitor")]
+    threads = [threading.Thread(target=_janitor, daemon=True, name="janitor"),
+               threading.Thread(target=_maintenance, daemon=True, name="outbox"),
+               threading.Thread(target=_telemetry, args=(worker_id,), daemon=True, name="telemetry")]
     threads += [
         threading.Thread(target=_slot, args=(f"{worker_id}#{i}",), daemon=True, name=f"slot-{i}")
         for i in range(s.worker_concurrency)

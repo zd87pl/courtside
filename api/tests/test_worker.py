@@ -15,9 +15,12 @@ def runtime(monkeypatch, tmp_path):
     worker_settings = worker.settings()
     monkeypatch.setattr(worker, "settings", lambda: replace(
         worker_settings, work_dir=str(tmp_path), heartbeat_s=0.02, job_timeout_s=5))
+    monkeypatch.setattr(worker.storage, "head", lambda *a: {"etag": "source"})
+    monkeypatch.setattr(worker.checkpoints, "restore", lambda *a: None)
+    monkeypatch.setattr(worker.billing, "summary", lambda *a: {"confirmed_usd": 0, "reserved_usd": 0})
     monkeypatch.setattr(worker.storage, "download", lambda key, dest, callback=None: None)
     monkeypatch.setattr(JobOptions, "to_argv", lambda *a: [
-        sys.executable, "-c", "import time; time.sleep(0.5)"])
+        sys.executable, "-c", "import time; time.sleep(0.5)", "--"])
     worker._shutdown.clear()
     yield tmp_path
     worker._shutdown.clear()
@@ -42,7 +45,7 @@ def test_silent_child_still_heartbeats(runtime, monkeypatch):
 @pytest.mark.parametrize("reason", ["timeout", "cancelled", "shutdown"])
 def test_silent_child_is_interrupted(runtime, monkeypatch, reason):
     monkeypatch.setattr(JobOptions, "to_argv", lambda *a: [
-        sys.executable, "-c", "import time; time.sleep(20)"])
+        sys.executable, "-c", "import time; time.sleep(20)", "--"])
     lease = worker.Lease(make_row(worker_id="w", attempts=1))
     calls = 0
     original = lease.check

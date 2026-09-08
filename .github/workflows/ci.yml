@@ -52,7 +52,7 @@ jobs:
           tags: courtside-ci:test
       - name: Check image runtime and fresh volume permissions
         run: |
-          docker run --rm -v courtside-ci-work:/data courtside-ci:test python -c 'import os, pathlib, cv2; from ultralytics import YOLO; assert os.getuid() == 10001; pathlib.Path("/data/work/check").touch(); YOLO("/opt/courtside/yolo11n-pose.pt")'
+          docker run --rm -v courtside-ci-work:/data courtside-ci:test python -c 'import os, pathlib, cv2, importlib.util; assert os.getuid() == 10001; pathlib.Path("/data/work/check").touch(); assert importlib.util.find_spec("ultralytics") is None'
           docker volume rm courtside-ci-work
 
   api-integration:
@@ -62,14 +62,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r api/requirements.txt pytest httpx
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: pip install -e '.[dev,server]' -r api/requirements.txt httpx
       - run: docker compose -p courtside-handoff -f api/docker-compose.yml up -d --wait postgres minio
       - run: docker compose -p courtside-handoff -f api/docker-compose.yml run --rm createbucket
       - name: Real Postgres and S3 contract tests
         env:
           COURTSIDE_INTEGRATION: "1"
+          COURTSIDE_TEST_PG_CONTAINER: courtside-handoff-postgres-1
+          WEBHOOK_SECRET: integration-secret
+          WEBHOOK_ALLOWED_HOSTS: example.com
           DATABASE_URL: postgres://courtside:courtside@localhost:5432/courtside
           ADMIN_TOKEN: integration-admin
+          OPENROUTER_API_KEY: test-only
           S3_BUCKET: courtside
           S3_ENDPOINT_URL: http://localhost:9000
           S3_PUBLIC_ENDPOINT_URL: http://localhost:9000

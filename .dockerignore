@@ -31,3 +31,8 @@ fly.deploy.*.toml
 cloud/node_modules
 cloud/.next
 *.MOV
+
+# Database backups and erasure manifests contain customer data.
+backups/
+*.dump
+*.backup

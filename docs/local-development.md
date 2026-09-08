@@ -66,8 +66,9 @@ courtside --from-dir match_courtside
 courtside match.mp4 --resume
 ```
 
-The CLI's resume option applies to its local output directory. API worker retries
-currently restart analysis; they do not use this checkpoint mechanism.
+The CLI's resume option applies to its local output directory. API workers also
+persist completed clip checkpoints in object storage and reuse them when source,
+options, and pipeline code match. See [API recovery](../api/OPERATIONS.md#upload-and-analysis-recovery).
 
 With the `youtube` extra installed, a supported video URL can replace the file
 path. The source is downloaded before processing; only use footage you may process.
@@ -142,7 +143,7 @@ joint-angle estimates, and comparisons with other strokes in the session.
 
 Pose angles are 2D image-plane estimates. Missing pose dependencies or individual
 moment failures can leave results without those assets. The first local pose run
-may download weights; the deployed API image bundles its pose model. Review
+may download weights; only the explicitly opted-in API pose build bundles weights. Review
 [third-party licensing](third-party.md) when using these components.
 
 ## Offline local runs

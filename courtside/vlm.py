@@ -147,6 +147,7 @@ class ServerVLM:
     _schema_ok = True
     _reasoning_ok = False
     _disable_thinking = False
+    _billing = None
 
     def __init__(self, base_url: str, model: str, api_key: str | None = None,
                  timeout: float = 180.0):
@@ -156,7 +157,12 @@ class ServerVLM:
 
         key = api_key or os.environ.get("OPENROUTER_API_KEY") \
             or os.environ.get("OPENAI_API_KEY") or "not-needed"
-        self.client = OpenAI(base_url=base_url, api_key=key, timeout=timeout)
+        self._billing = None
+        if os.environ.get("COURTSIDE_JOB_ID"):
+            from courtside_api import billing
+            self._billing = billing
+        self.client = OpenAI(base_url=base_url, api_key=key, timeout=timeout,
+                             max_retries=0 if self._billing else 2)
         self.model = model
         self.load_s = 0.0
         self._schema_ok = True  # flips off after a server rejects response_format
@@ -205,9 +211,21 @@ class ServerVLM:
                 "reasoning": {"effort": "none" if self._disable_thinking else "low"},
             }
 
+        def _request(r: dict) -> Any:
+            call_id = self._billing.begin(self.model) if self._billing else None
+            try:
+                response = self.client.chat.completions.create(**r)
+            except Exception as e:
+                if self._billing:
+                    self._billing.finish(call_id, error=e)
+                raise
+            if self._billing:
+                self._billing.finish(call_id, response=response)
+            return response
+
         def _create(r: dict) -> Any:
             try:
-                return self.client.chat.completions.create(**r)
+                return _request(r)
             except Exception as e:
                 if getattr(e, "status_code", None) != 400:
                     raise
@@ -226,7 +244,7 @@ class ServerVLM:
                     self._schema_ok = False
                     r = dict(r)
                     r.pop("response_format")
-                    return self.client.chat.completions.create(**r)
+                    return _request(r)
                 raise
 
         t0 = time.perf_counter()

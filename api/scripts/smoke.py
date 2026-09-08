@@ -26,7 +26,7 @@ def main():
     def request(method, path, body=None):
         req = urllib.request.Request(base + path, method=method,
             data=json.dumps(body).encode() if body is not None else None,
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "X-Courtside-User-Id": os.environ.get("COURTSIDE_USER_ID", "smoke-test-user")})
         with urllib.request.urlopen(req, timeout=60) as resp:
             return json.load(resp)
 
@@ -46,7 +46,7 @@ def main():
     request("POST", f"/v1/uploads/{jid}/complete", {"parts": parts})
     if not args.analyze:
         request("POST", f"/v1/jobs/{jid}/cancel")
-        print("Upload/complete/cancel passed; no model calls. Source expires via bucket lifecycle.")
+        print("Upload/complete/cancel passed; no model calls. Worker maintenance and bucket lifecycle handle source cleanup.")
         return
     request("POST", f"/v1/jobs/{jid}/start", {"options": {"max_clips": 1, "moments": 0, "pose": False}})
     deadline = time.monotonic() + args.timeout

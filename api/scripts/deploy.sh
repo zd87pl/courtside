@@ -434,7 +434,7 @@ ensure_app_secrets() {
   # passed as argv and never printed -- so values never land in process
   # listings, shell history, or this script's own command-echo output.
   local secret_names=() secret_lines="" generated_admin="" generated_webhook="" name
-  for name in WEBHOOK_ALLOWED_HOSTS CORS_ORIGINS DEFAULT_MODEL OPENROUTER_URL; do
+  for name in WEBHOOK_ALLOWED_HOSTS CORS_ORIGINS DEFAULT_MODEL OPENROUTER_URL ALLOWED_MODELS REQUIRE_USER_ID MAX_PENDING_UPLOADS UPLOADS_PER_HOUR STARTS_PER_HOUR REQUIRE_PROVIDER_BUDGET REQUEST_RESERVE_USD REPORT_RETENTION_DAYS; do
     if [[ -n "${!name:-}" ]]; then
       secret_names+=("$name")
       secret_lines+="$name=${!name}"$'\n'

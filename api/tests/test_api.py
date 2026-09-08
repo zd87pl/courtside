@@ -23,6 +23,8 @@ PRINCIPAL = auth.Principal(account_id=ACCOUNT, account_name="Test Club",
 def make_row(**over):
     now = datetime.now(timezone.utc)
     row = {
+        "owner_id": None, "upload_multipart": False, "requested_bytes": None,
+        "deletion_requested_at": None, "deleted_at": None, "checkpoint_key": None,
         "id": uuid.uuid4(), "account_id": ACCOUNT, "status": "awaiting_upload",
         "phase": "queued", "progress": 4, "filename": "match.mp4",
         "content_type": "video/mp4", "video_key": "uploads/a/b/source.mp4",
@@ -86,13 +88,17 @@ def test_create_upload_returns_a_presigned_put(client, monkeypatch):
 
 
 def test_multipart_upload_returns_per_part_urls(client, monkeypatch):
-    row = make_row()
+    row = make_row(upload_multipart=True, requested_bytes=50 << 20)
     monkeypatch.setattr(jobs, "create", lambda *a, **k: row)
     monkeypatch.setattr(storage, "plan_multipart", lambda *a, **k: storage.MultipartPlan(
         upload_id="mp-1", part_size=32 << 20,
         urls=[{"part_number": 1, "url": "https://bucket/p1"},
               {"part_number": 2, "url": "https://bucket/p2"}]))
-    monkeypatch.setattr("courtside_api.app.db.conn", _fake_conn)
+    conn = _FakeConn()
+    class Cursor(_FakeCursor):
+        def fetchone(self): return row
+    conn.execute = lambda *a, **k: Cursor()
+    monkeypatch.setattr("courtside_api.app.db.conn", lambda: conn)
     r = client.post("/v1/uploads", json={"filename": "m.mov", "multipart": True,
                                          "size_bytes": 50 << 20})
     assert r.status_code == 201
@@ -131,7 +137,7 @@ def test_start_resolves_and_persists_the_selected_model(client, monkeypatch, req
     from courtside_api.config import settings
     model = "qwen/qwen3.8-27b"
     monkeypatch.setattr("courtside_api.app.settings", lambda: config)
-    config = replace(settings(), default_model=model)
+    config = replace(settings(), default_model=model, allowed_models=(model, "vendor/custom-vision-model"))
     row = make_row()
     captured = {}
     monkeypatch.setattr(jobs, "get", lambda *a: row)
@@ -266,6 +272,7 @@ class _FakeCursor:
 
 
 class _FakeConn:
+    def transaction(self): return self
     def execute(self, *a, **k): return _FakeCursor()
     def __enter__(self): return self
     def __exit__(self, *a): return False

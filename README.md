@@ -4,6 +4,11 @@ Courtside turns tennis videos into structured stroke/error analysis and reports
 for coaches. Deploy its asynchronous API on your infrastructure, then connect
 your mobile or web app through your existing backend.
 
+The handover includes **the API and worker as the primary integration service**
+and **the `cloud/` browser prototype** for the receiving team to deploy, evaluate,
+and develop. The prototype runs independently with its own login and Neon database;
+its [setup and acceptance checklist](cloud/README.md) are part of this handover.
+
 **The default model is Qwen3.8 27B through OpenRouter** (`qwen/qwen3.8-27b`).
 The API and worker need no GPU or local LLM. You supply your own OpenRouter key,
 Postgres database, and private S3-compatible bucket; the local quick start provides
@@ -18,7 +23,7 @@ Postgres and MinIO in Docker.
 | Deploy with your own keys and infrastructure | [Deployment guide](api/DEPLOYMENT.md): Fly.io or your own containers |
 | Change or test the Python code | [Developer workflow](#developer-workflow) |
 | Run analysis directly on a Mac or through a model endpoint | [Local pipeline and UI guide](docs/local-development.md) |
-| Explore the separate Next.js browser prototype | [Cloud README](cloud/README.md) |
+| Set up the included Next.js browser prototype | [Browser setup and handover checklist](cloud/README.md) |
 | Transfer the repository to another team | [Handoff checklist](HANDOFF.md) |
 
 To inspect the output before installing anything, download/open the
@@ -45,10 +50,11 @@ flowchart LR
   Worker -->|JSON, Markdown and HTML reports| Storage
 ```
 
-Your backend owns user login, the mapping from users to jobs, authorization,
-notifications, and any billing. Courtside account keys grant access to all jobs
-in that account. Keep them on your backend; give the app only the job information
-and short-lived storage URLs its user is allowed to access.
+Your backend owns user login, notifications, and any billing. Keep account keys
+on that backend and send `X-Courtside-User-Id`, derived from its verified session,
+on each API request. Courtside scopes jobs to that account and user ID. The header
+is delegated identity, not proof of login; never copy it from an untrusted phone
+request. Return only the authorized job information and short-lived storage URLs.
 
 The phone uploads the full video directly to your bucket. The worker sends sampled
 JPEG frames and prompts to OpenRouter and its inference provider. Reports can
@@ -58,7 +64,8 @@ and results as described in [deployment operations](api/DEPLOYMENT.md#storage-an
 ## Local API quick start
 
 Prerequisites: a clone of this repository, Docker with Compose v2, Bash, curl,
-Python 3 for the smoke script, and an OpenRouter key with credits/model access.
+Python 3 for the smoke script, and an OpenRouter key with credits/model access
+and a finite spending limit. Worker startup verifies that provider-side limit.
 Use a short MP4 you have permission to process. All commands below start from the
 repository root; no Python package installation is needed for this Docker path.
 
@@ -72,8 +79,8 @@ export OPENROUTER_API_KEY
 docker compose -f api/docker-compose.yml up --build
 ```
 
-The first build downloads dependencies and the bundled CPU pose model. Qwen runs
-remotely. The local stack reads the exported key; it does **not** automatically
+The first build downloads video-processing dependencies. Pose libraries/weights
+are omitted by default; Qwen runs remotely. The local stack reads the exported key; it does **not** automatically
 load `api/.env`. A worker with no key exits with an error.
 
 In a second terminal, from the repository root, wait for readiness to return 200:
@@ -138,19 +145,21 @@ named volumes. Adding `-v` deletes local database, object-store, and scratch dat
 
 ## Integrate with your app
 
-Backend API requests use `Authorization: Bearer <account-api-key>`. Administrative
-requests use `X-Admin-Token`. Storage requests use the signed URL's credentials;
+Backend API requests use `Authorization: Bearer <account-api-key>` and
+`X-Courtside-User-Id: <verified-app-user-id>`. Administrative requests use
+`X-Admin-Token`. Storage requests use the signed URL's credentials;
 **do not forward either API authentication header to storage**.
 
 | Step | Caller and request | Result |
 |---|---|---|
-| Reserve | Backend: `POST /v1/uploads` | Persist `job_id` and return the permitted upload plan to the app |
+| Reserve | Backend: `POST /v1/uploads` with `Idempotency-Key` | Persist `job_id` and return the permitted upload plan to the app |
 | Upload | App: `PUT` raw bytes to the signed URL(s) | For multipart, save each part's `ETag` |
 | Complete | Backend: `POST /v1/uploads/{job_id}/complete` | Required for multipart only; does not start analysis |
 | Start | Backend: `POST /v1/jobs/{job_id}/start` | Returns a queued job immediately |
 | Poll | Backend: `GET /v1/jobs/{job_id}` | Status, phase, progress, and an optional ETA |
 | Get results | Backend: `GET /v1/jobs/{job_id}/report` | Summary and signed HTML, JSON, and Markdown URLs |
 | Cancel | Backend: `POST /v1/jobs/{job_id}/cancel` | Requests cancellation; poll until terminal |
+| Export/delete | Backend: `GET /v1/jobs/{job_id}/export` or `DELETE /v1/jobs/{job_id}` | Export before deletion; poll `/v1/deletions/{job_id}` for erasure completion |
 
 For a small integration preview, send this start body:
 
@@ -160,15 +169,17 @@ For a small integration preview, send this start body:
 
 Omit `options.model` to use Qwen3.8 27B. The API records the resolved model in
 `options.model` when it queues the job. Operators can change `DEFAULT_MODEL`, and
-a backend can override the model for one job; see [model configuration](api/README.md#default-llm).
-Default analysis options process the whole video (`max_clips: 0`) with pose enabled
-and up to six moments, so use a limited preview while integrating.
+a backend can select an operator-allowlisted model for one job; see
+[model configuration](api/README.md#default-llm). Default analysis options process
+the whole video (`max_clips: 0`) with pose disabled and up to six moments, so use
+a limited preview while integrating.
 
 Poll every 3–5 seconds in the foreground and back off in the background. Handle
 `succeeded`, `failed`, `cancelled`, and `expired` as terminal states. Fetch fresh
-report URLs when they expire. Webhooks are optional, signed, and best effort;
-polling is needed for recovery. Upload reservations are not idempotent, so persist
-the returned job ID and follow the documented retry rules.
+report URLs when they expire. Uploads support idempotent reservation, URL refresh,
+and multipart recovery. Completed clip checkpoints survive worker retries. Optional
+signed webhooks use a durable outbox; deduplicate deliveries and keep polling for
+recovery. Follow the [recovery and operations guide](api/OPERATIONS.md).
 
 The [mobile integration contract](api/MOBILE_INTEGRATION.md) covers request bodies,
 chunking, errors, retries, WebViews, and webhook verification. Use the checked-in
@@ -188,7 +199,7 @@ configuration, and acceptance checks:
 
 Start from [the environment template](api/.env.example). Keep provider/storage/admin
 secrets in the deployment and account keys in your backend. Configure backups,
-bucket lifecycle, rate limits, and a provider budget, then run the smoke tests through
+bucket lifecycle, user mapping, quotas, and a provider budget, then run the smoke tests through
 your public HTTPS endpoint. See the [handoff checklist](HANDOFF.md) and
 [remaining production work](docs/review.md#recommended-next-work).
 
@@ -230,8 +241,9 @@ git diff --check
 Python dependency ranges are in `pyproject.toml` and `api/requirements.txt`;
 container builds also apply `api/constraints.txt`. The browser app has its own
 lockfile. CI checks Python tests, the API image, DB/storage integration, and the
-browser build/tests. Schema bootstrap creates the initial tables; future table
-changes need an explicit migration plan.
+browser build/tests. Startup applies checksummed, ordered database migrations.
+Read the [upgrade and backup runbook](api/OPERATIONS.md) before updating an existing
+deployment: version 0.2.0 adds required delegated user identity and provider budgets.
 
 ## Analysis limits and licensing
 
@@ -246,4 +258,4 @@ The [architecture comparison](docs/architecture.md) describes a proposed larger
 system; dedicated event spotting and its other services are not included here.
 The repository uses the [MIT license](LICENSE); third-party code, model weights,
 and sample assets have their own terms. Read [third-party notes](docs/third-party.md)
-before distributing or deploying the bundled pose components.
+before opting into the separate pose build or distributing third-party components.
